@@ -96,7 +96,7 @@ authoritative only when implemented.
 | Resource | Default and accounting |
 | --- | --- |
 | Device collection | 8 MiB per process/Device, split by formula into the event ring, per-Endpoint `observation_region`s, process-wide Graph Context, and per-process calibration sampler storage; see [the device collection budget composition](shared-contract.md#device-collection-budget-composition) |
-| Host collection | 32 MiB per process, including queues, staging, Writer-held blocks, metadata, and snapshot views |
+| Host collection | 32 MiB per process of internal collection storage, including result construction and handoff peaks; independently delivered results with no internal retention belong to the caller; see [Host accounting and result ownership](shared-contract.md#host-collection-accounting-and-result-ownership) |
 | Raw chunk | At most 1 MiB including the 128-byte header |
 | Collection and periodic sampling | 100 ms; at most one in-flight sample per sampler |
 | Runtime disk | 1 GiB per process, including metadata, temporary files, snapshots, and attachments; reserve 8 MiB for metadata |
@@ -153,6 +153,12 @@ report/snapshot hash mismatch, report resource admission, periodic background
 transfer during serving, Device slot
 reclamation before file publication, slow Writer isolation, bounded Host
 exhaustion, I/O failure, quota exhaustion, and background-thread shutdown.
+Host ownership checks must cover overlapping reconstruction/result/serialization
+peaks, publication while the Writer still retains memory, the final internal
+reference ending after external handoff, rejection of shared views as independent
+results, and a caller retaining result A while reading B. Reject a construction
+peak above the Host budget even if the delivered result would later be charged
+to the caller.
 Follow [test conventions](../../../tests/README.md), repository-managed Ruff,
 type, and clang-format checks. Native Host tests attempt ASAN/UBSAN with the
 required execution approval.

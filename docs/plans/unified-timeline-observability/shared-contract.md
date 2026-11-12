@@ -584,6 +584,38 @@ and shutdown deadline. A timeout does not permit releasing resources still
 used by a collection thread or in-flight CUDA/IPC work. Disabled observation
 starts no collection thread.
 
+### Host collection accounting and result ownership
+
+`debug.timeline.host_bytes` (default 33,554,432 bytes, or 32 MiB, per
+process) bounds internal collection storage. Include collection/control
+storage, metadata, queues, staging, Writer-held blocks, snapshot/report
+reconstruction, read staging, result/binding-object construction, and automatic
+export serialization at their simultaneously live peak. Construction and
+handoff must fit this budget before a result can leave internal accounting;
+an expected later handoff or file publication cannot excuse an earlier peak.
+
+An independently owned result belongs to the external caller's memory budget
+only after handoff is complete and no internal owner, Writer, reader, or
+borrowed view retains or accesses that allocation. Internal copies remain
+charged; copies independently created by the external caller belong to that
+caller. A shared view of an internal slab or a `poll` span is not an
+independently owned result. Returning from a getter alone does not establish
+that internal references have ended.
+
+Automatic export remains internal work. File publication does not retire a
+snapshot, queued export object, or serialization storage still held internally.
+Charge that storage until it is released or independently handed off under the
+boundary above. Published and retained temporary files separately consume disk
+quota, so memory and file representations may consume both budgets at once.
+
+Preserve the existing Native vector/getter/Record interfaces, Python values,
+legacy JSON shapes, and read synchronization preconditions. A caller may retain
+independent result A while reading result B; B must not invalidate A or require
+the caller to release A first. B's internal construction peak still needs
+admission. The 32 MiB limit is not a total process-memory or RSS limit including
+external results and caller copies. Accounting transfer does not free physical
+memory; distinguish the internal collection ledger from total memory use.
+
 ## Raw Chunks and Errors
 
 Published path: `chunks/<producer>/<chunk_sequence>.xpool`. The header is
@@ -767,6 +799,9 @@ slab bytes are `sum(transport_capacity * 256 for open Endpoints) +
 fabric_capacity * 384`. Native snapshot result staging adds its actual declared
 Record sizes and bounded vector overhead at peak read time. The slots, metadata,
 queues, and peak read staging must fit Host budget; startup fails otherwise.
+Apply [Host collection accounting and result ownership](
+#host-collection-accounting-and-result-ownership) to result construction,
+handoff, and retained results from repeated reads.
 
 Presence, not the value zero, controls event merging. Merge repeated facts only
 when equal; a conflict is an explicit structured error. Identical event identity
@@ -994,6 +1029,9 @@ staging and JSON serialization count toward Host budget; published and temporary
 sidecars count toward disk quota. Include their declared worst-case sizes in
 startup admission, alongside existing slabs, metadata and queues. Do not collect
 an unbounded list of repeated Events or silently omit report entries on exhaustion.
+Report handoff follows the same [Host ownership boundary](
+#host-collection-accounting-and-result-ownership); serialization or sidecar
+publication does not end accounting for internally retained report storage.
 An unavailable/disabled legacy observer has no separate report, matching its
 existing unavailable getter result. Producer quality checkpoints remain aggregate
 collection evidence and never substitute for this per-snapshot report.
