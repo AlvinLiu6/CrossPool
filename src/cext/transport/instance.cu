@@ -33,16 +33,17 @@ XPOOL_DEVICE_FN void fill_failure_output(const cooperative_groups::thread_block 
 // Execute one synchronous Instance-side mailbox transaction on the device;
 // graph capture preserves its addresses and control flow.
 template <typename Scalar>
-XPOOL_KERNEL_FN void instance_transport_kernel(ArenaView arena, const Scalar *hidden_input, Scalar *hidden_output,
-                                               std::size_t hidden_numel, std::size_t payload_rows,
-                                               const void *dp_rank_payload_rows, bool dp_rank_payload_rows_are_i64,
-                                               xpool::transport::RequestMetadata request_metadata) {
+XPOOL_KERNEL_FN void
+instance_transport_kernel(ArenaView arena, const Scalar *hidden_input, Scalar *hidden_output, std::size_t hidden_numel,
+                          std::size_t payload_rows, const void *dp_rank_payload_rows, bool dp_rank_payload_rows_are_i64,
+                          xpool::transport::RequestMetadata request_metadata, ObservationView observation) {
   XPOOL_DEVICE_SHARED xpool::utils::wait::Status wait_result;
   XPOOL_DEVICE_SHARED xpool::ffn::ResultCode result_code;
   XPOOL_DEVICE_SHARED MailboxStatus observed_status;
   XPOOL_DEVICE_SHARED bool terminal_before_staging;
   XPOOL_DEVICE_SHARED bool canonical_failure_after_timeout;
 
+  auto operation = OperationFact{};
   const auto group = cooperative_groups::this_thread_block();
   auto &mailbox = arena.mailbox();
 
@@ -63,11 +64,13 @@ XPOOL_KERNEL_FN void instance_transport_kernel(ArenaView arena, const Scalar *hi
         result_code =
             terminal_failure != xpool::ffn::ResultCode::Ok ? terminal_failure : xpool::ffn::ResultCode::Shutdown;
       } else {
+        operation = observation.claim();
         xpool::hooks::TransportInstanceProtocolEvent::hooks(
             {.arena = arena,
              .kind = xpool::hooks::TransportProtocolEventKind::RequestStagingStarted,
              .payload_rows = payload_rows,
-             .request = &request_metadata});
+             .request = &request_metadata,
+             .operation = operation});
       }
     }
   }
@@ -110,20 +113,24 @@ XPOOL_KERNEL_FN void instance_transport_kernel(ArenaView arena, const Scalar *hi
     mailbox.payload_rows = payload_rows;
     mailbox.request = request_metadata;
     xpool::hooks::TransportInstanceProtocolEvent::hooks(
-        {.arena = arena, .kind = xpool::hooks::TransportProtocolEventKind::RequestStagingCompleted});
+        {.arena = arena,
+         .kind = xpool::hooks::TransportProtocolEventKind::RequestStagingCompleted,
+         .operation = operation});
     const auto failure = arena.generation_failure();
     const auto shutdown = arena.shutdown_requested();
     if (failure != xpool::ffn::ResultCode::Ok || shutdown) {
       result_code = failure != xpool::ffn::ResultCode::Ok ? failure : xpool::ffn::ResultCode::Shutdown;
       mailbox.result_code = result_code;
       mailbox.close_staging();
-      xpool::hooks::TransportInstanceProtocolEvent::hooks(
-          {.arena = arena, .kind = xpool::hooks::TransportProtocolEventKind::Closed, .result_code = result_code});
+      xpool::hooks::TransportInstanceProtocolEvent::hooks({.arena = arena,
+                                                           .kind = xpool::hooks::TransportProtocolEventKind::Closed,
+                                                           .result_code = result_code,
+                                                           .operation = operation});
       terminal_before_staging = true;
     } else {
       mailbox.publish_request();
       xpool::hooks::TransportInstanceProtocolEvent::hooks(
-          {.arena = arena, .kind = xpool::hooks::TransportProtocolEventKind::RequestPublished});
+          {.arena = arena, .kind = xpool::hooks::TransportProtocolEventKind::RequestPublished, .operation = operation});
     }
   }
   group.sync();
@@ -166,15 +173,20 @@ XPOOL_KERNEL_FN void instance_transport_kernel(ArenaView arena, const Scalar *hi
                                                                                                         : failure;
     xpool::abort_if(!xpool::ffn::is_valid(result_code));
     xpool::hooks::TransportInstanceProtocolEvent::hooks(
-        {.arena = arena, .kind = xpool::hooks::TransportProtocolEventKind::ResultObserved, .result_code = result_code});
+        {.arena = arena,
+         .kind = xpool::hooks::TransportProtocolEventKind::ResultObserved,
+         .result_code = result_code,
+         .operation = operation});
   }
   group.sync();
   if (result_code != xpool::ffn::ResultCode::Ok) {
     fill_failure_output(group, hidden_output, hidden_numel);
     if (group.thread_rank() == 0) {
       mailbox.close_evaluated();
-      xpool::hooks::TransportInstanceProtocolEvent::hooks(
-          {.arena = arena, .kind = xpool::hooks::TransportProtocolEventKind::Closed, .result_code = result_code});
+      xpool::hooks::TransportInstanceProtocolEvent::hooks({.arena = arena,
+                                                           .kind = xpool::hooks::TransportProtocolEventKind::Closed,
+                                                           .result_code = result_code,
+                                                           .operation = operation});
     }
     return;
   }
@@ -186,16 +198,19 @@ XPOOL_KERNEL_FN void instance_transport_kernel(ArenaView arena, const Scalar *hi
                                   arena.output_payload().first(payload_bytes));
   if (group.thread_rank() == 0) {
     xpool::hooks::TransportInstanceProtocolEvent::hooks(
-        {.arena = arena, .kind = xpool::hooks::TransportProtocolEventKind::OutputCopied});
+        {.arena = arena, .kind = xpool::hooks::TransportProtocolEventKind::OutputCopied, .operation = operation});
     if (arena.shutdown_requested()) {
       mailbox.close_evaluated();
       xpool::hooks::TransportInstanceProtocolEvent::hooks({.arena = arena,
                                                            .kind = xpool::hooks::TransportProtocolEventKind::Closed,
-                                                           .result_code = xpool::ffn::ResultCode::Shutdown});
+                                                           .result_code = xpool::ffn::ResultCode::Shutdown,
+                                                           .operation = operation});
     } else {
       mailbox.acknowledge();
       xpool::hooks::TransportInstanceProtocolEvent::hooks(
-          {.arena = arena, .kind = xpool::hooks::TransportProtocolEventKind::ResultAcknowledged});
+          {.arena = arena,
+           .kind = xpool::hooks::TransportProtocolEventKind::ResultAcknowledged,
+           .operation = operation});
     }
   }
 }
@@ -216,7 +231,8 @@ void launch_request_kernel(const Request &request) {
   const auto launch = [&]<typename Scalar>() {
     instance_transport_kernel<Scalar><<<1, kRequestThreadsPerBlock, 0, request.stream>>>(
         request.arena, request.hidden_states.const_data_ptr<Scalar>(), request.output.data_ptr<Scalar>(), hidden_numel,
-        payload_rows, dp_rank_payload_rows, dp_rank_payload_rows_scalar_type == at::kLong, request.request_metadata);
+        payload_rows, dp_rank_payload_rows, dp_rank_payload_rows_scalar_type == at::kLong, request.request_metadata,
+        request.observation);
   };
   switch (request.hidden_states.scalar_type()) {
   case c10::ScalarType::Half:

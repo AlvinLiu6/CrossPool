@@ -312,7 +312,14 @@ void Runtime::finalize() {
   if (ffn_execution_runtime_.installed()) {
     ffn_execution_runtime_.finalize();
   }
+  // Retry only after FFN Graph destruction succeeded. A partial FFN cleanup
+  // above keeps the original Closed fail-stop state.
+  phase_ = Phase::Drained;
   xpool::hooks::FabricFinalizePreEvent::hooks({.device = *device_});
+  // Observer collection may time out while symmetric allocations and their
+  // runtime remain intact. Keep Drained retryable until handoff. Once collective
+  // teardown starts, retain the existing fail-stop rule for partial destruction.
+  phase_ = Phase::Closed;
   ffnagent_control_.destroy();
   arena_.destroy();
   module_registration_.destroy();

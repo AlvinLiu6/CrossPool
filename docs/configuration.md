@@ -40,6 +40,36 @@ daemon-owned endpoint, while FFN uses an empty pipe value to bypass MPS. Keep
 endpoint selection out of machine-local `.env` files. See
 [managed startup](designs/control-plane.md#startup-and-shutdown).
 
+## Bounded timeline preparation
+
+`debug.timeline` is an immutable C0 v4 preparation policy. Its fields use the
+existing environment-only debug source rule: set `XPOOL_DEBUG_TIMELINE_ENABLE`
+and `XPOOL_DEBUG_TIMELINE_OUTDIR` together. The complete environment template
+is in [`.env.example`](../.env.example); these settings are rejected in TOML.
+Directories resolve from the working directory. In unified mode, every enabled
+Transport, Fabric, Graph or Routing legacy projection must use that same root.
+
+Defaults are 8 MiB of collection memory per process/Device, 32 MiB of Host
+collection memory per process, a 100 ms scan interval, at most 1 MiB per complete
+chunk, and a 1 GiB shared disk quota with an 8 MiB metadata/close reserve.
+Shutdown adds at most 5000 ms within the production deadline; calibration blocks
+contain exactly ten attempts. Event/Endpoint/Context/sampler capacities default
+to 16384/8/64/1. Positive resource values, native integer widths, chunk bounds,
+and space for both metadata and a chunk are validated before preparation.
+
+The 4,459,336-byte default Device logical minimum is a lower bound. Preparation
+must also account for active categories, allocation rounding, transfer scratch
+and every implementation-owned resource. Host admission requires explicit
+owner declarations for all allocation and peak-read categories. Missing sizes
+fail admission; they are not assumed to be zero. Legacy staging uses the actual
+Native Record/vector sizes, preserving existing getter containers.
+
+Collection providers are still being implemented. Policy resolution and budget
+queries are available; `DebugConfig.native_options()` explicitly rejects enabled
+unified mode until its required providers are prepared. Disabled timeline policy
+preserves the existing independent observer path. This check prevents reporting
+an enabled unified collector when no Collector/Writer has been installed.
+
 ## Development tools and shared cache
 
 Copy `configs/xkit.example.toml` to ignored `configs/xkit.local.toml` and select it
@@ -168,3 +198,13 @@ model weights.
 At startup, an explicitly configured profile must exist and match the
 deployment environment; startup reports missing, malformed, or incompatible
 profiles.
+
+The independent SGLang Graph observer uses the frozen `debug.timeline` Host and
+disk limits, collection interval and shutdown wait for its background JSONL
+service, even when unified timeline capture is disabled. Hooks enqueue bounded
+records; the Writer makes their original JSONL fields visible asynchronously.
+Call `xpool.integrations.sglang.devkit.graph_observer.close()` after runner work
+stops when a complete local read is needed; process exit also attempts this
+bounded close. A close-time report distinguishes queue drops and file failure
+from worker retirement. Existing destination files remain intact and cause an
+explicit output failure. Full unified mode still requires production providers.

@@ -24,6 +24,8 @@ from xpool.fabric import (
     RandomSchedulerPolicy,
 )
 from xpool.native import ABI_VERSION, RuntimeRole
+from xpool.observation import ObservationDeviceRequest
+from xpool.runtime.observation import ObservationRuntime, prepare_observation
 from xpool.service.client import XpoolClient, XpoolClientError
 from xpool.service.errors import XpoolDaemonError
 from xpool.service.wire import (
@@ -157,12 +159,15 @@ class Agent(ABC):
             bootstrap.init(self.device, runtime_role)
             if endpoint is not None:
                 endpoint.require_client()
+            self.observation_request = ObservationDeviceRequest.current()
             devkit.install()
         except Exception:
             self.client.close()
             raise
         self.registered = False
         self.fabric_plan: FabricPlan | None = None
+        self.observation: ObservationRuntime | None = None
+        self.cleanup_deadline: float | None = None
         self.fabric_arena_projection: xpool.native.fabric.ArenaProjection | None = None
         self.fabric_phase: FabricGenerationPhase | None = None
         self.participant_report: FabricParticipantReport | None = None
@@ -233,6 +238,14 @@ class Agent(ABC):
         if self.fabric_plan is not None and response.generation != self.fabric_plan.generation:
             raise AgentError("daemon heartbeat returned a different Fabric generation")
         self.fabric_phase = response.fabric_phase
+        if response.cleanup_deadline is not None:
+            self.cleanup_deadline = (
+                response.cleanup_deadline
+                if self.cleanup_deadline is None
+                else min(self.cleanup_deadline, response.cleanup_deadline)
+            )
+            if self.observation is not None:
+                self.observation.limit_cleanup(self.cleanup_deadline)
 
     def poll_fabric_health(self) -> None:
         """Publish canonical native failure or reject unexpected Resident exit."""
@@ -283,9 +296,15 @@ class Agent(ABC):
         try:
             match self.fabric_phase:
                 case FabricGenerationPhase.PREPARING_JOIN if report is None:
+                    self.observation = prepare_observation(self.fabric_plan, self.observation_request, self.observation)
+                    if self.observation is not None and self.cleanup_deadline is not None:
+                        self.observation.limit_cleanup(self.cleanup_deadline)
+                    if self.fabric_arena_projection is None:
+                        self.fabric_arena_projection = project_fabric_arena(self.fabric_plan)
+                    if self.observation is not None:
+                        self.observation.prepare_fabric(self.fabric_arena_projection, self.fabric_pe())
                     if not self.prepare_fabric_join():
                         return
-                    self.fabric_arena_projection = project_fabric_arena(self.fabric_plan)
                     self.report_fabric_phase(FabricParticipantPhase.JOIN_READY)
                 case FabricGenerationPhase.JOINING if report is not None:
                     if report.phase is FabricParticipantPhase.JOIN_READY:
@@ -526,6 +545,7 @@ class Agent(ABC):
         ):
             releasing = False
             released = False
+            production_released = False
             try:
                 self.run_control_loop(self.shutdown_requested)
                 self.shutdown_fabric()
@@ -534,6 +554,9 @@ class Agent(ABC):
                 self.close_role()
                 torch.cuda.synchronize(self.device)
                 self.client.close()
+                production_released = True
+                if self.observation is not None:
+                    self.observation.close()
                 released = True
                 if self.failure is not None:
                     raise self.failure
@@ -562,6 +585,10 @@ class Agent(ABC):
                     for name, close in (
                         ("heartbeat worker", self.heartbeat_worker.close),
                         ("role resources", self.close_role),
+                        (
+                            "observation resources",
+                            self.observation.close if self.observation is not None else lambda: None,
+                        ),
                         ("device completion", lambda: torch.cuda.synchronize(self.device)),
                         ("daemon client", self.client.close),
                     ):
@@ -579,6 +606,19 @@ class Agent(ABC):
                     "agent retirement unconfirmed; retaining resources device=%s pid=%s", self.device, self.proc_id.pid
                 )
                 while True:
+                    if production_released:
+                        # Only Writer-held Host storage remains. Poll the same
+                        # expired Native deadline; do not re-enter production
+                        # teardown or renew the observation wait budget.
+                        try:
+                            if self.observation is not None:
+                                self.observation.close()
+                        except Exception as cleanup_error:
+                            self.fail(cleanup_error)
+                        else:
+                            raise failure
+                        time.sleep(AGENT_SHUTDOWN_POLL_INTERVAL_S)
+                        continue
                     response = self.heartbeat_worker.consume_response()
                     if response is not None and not releasing:
                         try:

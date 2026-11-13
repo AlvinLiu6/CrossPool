@@ -15,6 +15,7 @@ from xpool.fabric import FabricGenerationPhase, FabricParticipantPhase
 from xpool.model import ModelId
 from xpool.native import ABI_VERSION, RuntimeRole
 from xpool.runtime.agent import AGENT_SHUTDOWN_POLL_INTERVAL_S, Agent, AgentError, AgentHeartbeat
+from xpool.runtime.observation import ObservationRuntime
 from xpool.service.client import XpoolClient, XpoolClientError
 from xpool.service.errors import XpoolDaemonError
 from xpool.service.wire import (
@@ -24,7 +25,7 @@ from xpool.service.wire import (
     InstanceRankRegistration,
     ProcessRef,
 )
-from xpool.transport import TransportArenaHandle
+from xpool.transport import TransportArenaHandle, TransportObservationRegion
 
 __all__ = ["AtnAgent", "AtnAgentTransportArenaState", "AtnAgentTransportRuntime"]
 
@@ -60,7 +61,19 @@ class AtnAgentTransportArenaState:
         )
 
     def accept_registration(self, registration: InstanceRankRegistration) -> None:
-        """Retain a replacement owner only when native geometry is unchanged."""
+        """Accept matching geometry while keeping an observed Arena's process pairing immutable."""
+
+        if self.handle.observation_region is not None and (
+            self.registration.model_id != registration.model_id
+            or self.registration.rank != registration.rank
+            or self.registration.pid != registration.pid
+            or self.registration.abi_version != registration.abi_version
+            or self.registration.observation != registration.observation
+        ):
+            raise AgentError(
+                f"observed transport pairing changed for instance {self.model_id} rank "
+                f"{self.registration.rank}; a fresh Arena and Endpoint are required"
+            )
 
         if self.registration.transport != registration.transport:
             raise AgentError(
@@ -89,6 +102,8 @@ class AtnAgentTransportRuntime:
         self.publisher = publisher
         self.entries: dict[ModelId, AtnAgentTransportArenaState] = {}
         self.publication_deadline: float | None = None
+        self.publication_attempted = False
+        self.leases_quiesced = False
 
     @property
     def resources(self) -> tuple[AtnAgentTransportArenaState, ...]:
@@ -98,9 +113,9 @@ class AtnAgentTransportRuntime:
 
     @property
     def published(self) -> bool:
-        """Return whether any owned handle was published to the daemon."""
+        """Return whether owned handles may have reached the daemon, including lost responses."""
 
-        return any(entry.published_epoch is not None for entry in self.entries.values())
+        return self.publication_attempted or any(entry.published_epoch is not None for entry in self.entries.values())
 
     def local_registrations(self, instance_ranks: Mapping[ModelId, int]) -> dict[ModelId, InstanceRankRegistration]:
         """Return registrations assigned to this AtnAgent by the Fabric Plan."""
@@ -121,7 +136,12 @@ class AtnAgentTransportRuntime:
         logger.debug("waiting to publish transport arenas: %s", error)
         return False
 
-    def prepare(self, registration_epoch: int, instance_ranks: Mapping[ModelId, int]) -> bool:
+    def prepare(
+        self,
+        registration_epoch: int,
+        instance_ranks: Mapping[ModelId, int],
+        observation: ObservationRuntime | None = None,
+    ) -> bool:
         """Create and publish every currently registered local instance arena.
 
         Args:
@@ -129,6 +149,7 @@ class AtnAgentTransportRuntime:
                 registration. Handles are republished once per epoch.
             instance_ranks: Instance ranks assigned to this AtnAgent by the
                 current Fabric Plan.
+            observation: Actual cold preparation retained before Fabric join.
 
         Returns:
             True when every configured instance has a current-epoch publication.
@@ -156,18 +177,31 @@ class AtnAgentTransportRuntime:
                 registration = registrations.get(instance.model_id)
                 if registration is None or instance.model_id in self.entries:
                     continue
+                arguments = (
+                    instance_index,
+                    registration.rank,
+                    registration.transport.payload_row_capacity,
+                    registration.transport.hidden_size,
+                    registration.ffn_profile.payload_dtype,
+                    registration.transport.atn_tp_rank,
+                    registration.transport.atn_tp_size,
+                    registration.transport.atn_dp_rank,
+                    registration.transport.atn_dp_size,
+                )
+                pool = None if observation is None else observation.pool
+                native_handle = (
+                    xpool.native.transport.create_arena(*arguments, pool, observation.generation)
+                    if observation is not None and pool is not None
+                    else xpool.native.transport.create_arena(*arguments)
+                )
+                region = xpool.native.transport.observation_region(native_handle) if pool is not None else None
                 handle = TransportArenaHandle(
-                    handle=xpool.native.transport.create_arena(
-                        instance_index,
-                        registration.rank,
-                        registration.transport.payload_row_capacity,
-                        registration.transport.hidden_size,
-                        registration.ffn_profile.payload_dtype,
-                        registration.transport.atn_tp_rank,
-                        registration.transport.atn_tp_size,
-                        registration.transport.atn_dp_rank,
-                        registration.transport.atn_dp_size,
-                    )
+                    handle=native_handle,
+                    observation_region=(
+                        TransportObservationRegion.model_validate(region, from_attributes=True)
+                        if region is not None
+                        else None
+                    ),
                 )
                 created.append(
                     AtnAgentTransportArenaState(
@@ -176,6 +210,10 @@ class AtnAgentTransportRuntime:
                         handle=handle,
                     )
                 )
+                if observation is not None:
+                    observation.register_endpoint(
+                        handle, instance_index, registration.rank, registration.pid, registration.observation
+                    )
         except Exception as error:
             try:
                 self.rollback(created)
@@ -193,10 +231,15 @@ class AtnAgentTransportRuntime:
             if entry.model_id in registrations and entry.published_epoch != registration_epoch
         ]
         if publishable:
+            # A failed response cannot prove that the daemon rejected the handles.
+            # Retain the obligation to quiesce even when no epoch was acknowledged.
+            bindings = [entry.binding() for entry in publishable]
+            self.publication_attempted = True
+            self.leases_quiesced = False
             try:
                 self.client.upsert_atnagent_transport_arenas(
                     self.device,
-                    [entry.binding() for entry in publishable],
+                    bindings,
                     publisher=self.publisher,
                 )
             except (XpoolDaemonError, XpoolClientError) as error:
@@ -243,7 +286,7 @@ class AtnAgentTransportRuntime:
             raise AgentError(f"transport Resident failed on device {self.device}") from error
 
     def quiesce_leases(self) -> None:
-        """Close lease admission and wait for every live Instance-rank owner."""
+        """Close lease admission and wait for the daemon's remaining retirement obligations."""
 
         deadline = time.monotonic() + TRANSPORT_SHUTDOWN_DEADLINE_S
         while time.monotonic() < deadline:
@@ -259,6 +302,7 @@ class AtnAgentTransportRuntime:
                 time.sleep(AGENT_SHUTDOWN_POLL_INTERVAL_S)
                 continue
             if not response.in_use:
+                self.leases_quiesced = True
                 return
             logger.debug(
                 "waiting for transport arena leases rank=%s in_use=%s",
@@ -287,7 +331,12 @@ class AtnAgentTransportRuntime:
 
         if not entries:
             return
-        xpool.native.transport.destroy_arenas([entry.handle.handle for entry in entries])
+        handles = [entry.handle.handle for entry in entries]
+        if any(entry.handle.observation_region is not None for entry in entries):
+            # These newly created handles have never entered a publication RPC.
+            xpool.native.transport.destroy_arenas(handles, peer_mappings_detached=True)
+        else:
+            xpool.native.transport.destroy_arenas(handles)
 
     def quiesce(self) -> None:
         """Stop arena leases and drain every local transport arena."""
@@ -299,9 +348,17 @@ class AtnAgentTransportRuntime:
     def close(self) -> None:
         """Destroy and forget every previously drained Transport arena."""
 
+        if self.published and not self.leases_quiesced:
+            raise AgentError("transport arena publication requires confirmed lease quiescence before release")
         resources = self.resources
         if resources:
-            xpool.native.transport.destroy_arenas([entry.handle.handle for entry in resources])
+            handles = [entry.handle.handle for entry in resources]
+            if any(entry.handle.observation_region is not None for entry in resources):
+                xpool.native.transport.destroy_arenas(
+                    handles, peer_mappings_detached=not self.published or self.leases_quiesced
+                )
+            else:
+                xpool.native.transport.destroy_arenas(handles)
         self.entries.clear()
 
 
@@ -313,6 +370,7 @@ class AtnAgent(Agent):
 
         super().__init__(device=device, runtime_role=RuntimeRole.ATNAGENT)
         self.registration = AtnAgentRegistration(
+            observation=self.observation_request,
             device=device,
             abi_version=ABI_VERSION,
             pid=self.proc_id.pid,
@@ -359,7 +417,7 @@ class AtnAgent(Agent):
             for rank, atnagent_index in enumerate(instance_plan.instance_rank_topology.atnagent_indices)
             if atnagent_index == self.local_rank
         }
-        prepared = self.transport.prepare(self.registration_epoch, instance_ranks)
+        prepared = self.transport.prepare(self.registration_epoch, instance_ranks, self.observation)
         if prepared:
             logger.info(
                 "transport prepared device=%s rank=%s instance_count=%s",

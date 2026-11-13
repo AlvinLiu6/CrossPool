@@ -16,6 +16,15 @@ void bind_debug(pybind11::module_ &module);
 /// \param module Root `xpool.native` extension module.
 void bind_devkit(pybind11::module_ &module);
 
+/// Bind the cold preparation submodule under devkit.
+void bind_timeline(pybind11::module_ &module);
+/// Bind immutable policy and common preparation ledgers.
+void bind_timeline_policy(pybind11::module_ &module);
+/// Bind launcher identity assignment and imported process values.
+void bind_timeline_identity(pybind11::module_ &module);
+/// Bind bounded typed metadata preparation.
+void bind_timeline_meta(pybind11::module_ &module);
+
 /// Bind Fabric metadata, trace values, and lifecycle functions.
 /// \param module Root `xpool.native` extension module.
 void bind_fabric(pybind11::module_ &module);

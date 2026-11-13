@@ -14,7 +14,7 @@ from pydantic import Field
 
 import xpool.native
 from xpool.config import get_global_config
-from xpool.fabric import FabricGenerationId, FabricParticipantPhase
+from xpool.fabric import FabricGenerationId, FabricGenerationPhase, FabricParticipantPhase
 from xpool.native import RuntimeRole
 from xpool.runtime.agent import Agent
 
@@ -336,7 +336,7 @@ def write_fabric_snapshot(
 
 
 def install() -> None:
-    """Install per-PE Fabric snapshot recording after local drain completes."""
+    """Export drained snapshots immediately before final Source retirement."""
 
     outdir = get_global_config().debug.fabric_observer.outdir
     if outdir is None:
@@ -350,24 +350,18 @@ def install() -> None:
 
         @wraps(original_advance)
         def observed_advance(agent: Agent) -> None:
-            plan = agent.fabric_plan
-            previous_report = agent.participant_report
-            previous_phase = previous_report.phase if previous_report is not None else None
-            original_advance(agent)
-            updated_report = agent.participant_report
+            report = agent.participant_report
             if (
-                plan is None
-                or previous_phase is FabricParticipantPhase.DRAINED
-                or updated_report is None
-                or updated_report.phase is not FabricParticipantPhase.DRAINED
+                agent.fabric_plan is not None
+                and agent.fabric_phase is FabricGenerationPhase.FINALIZING
+                and report is not None
+                and report.phase is FabricParticipantPhase.DRAINED
             ):
-                return
-            try:
-                snapshot = xpool.native.devkit.fabric_observer.read()
-                if snapshot is not None:
-                    write_fabric_snapshot(plan.generation, snapshot)
-            except Exception:
-                logger.warning("failed to record xpool fabric observer snapshot", exc_info=True)
+                try:
+                    xpool.native.devkit.fabric_observer.export_snapshot()
+                except Exception:
+                    logger.warning("failed to record xpool fabric observer snapshot", exc_info=True)
+            original_advance(agent)
 
         setattr(Agent, "advance_fabric_lifecycle", observed_advance)
         installed = True

@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import json
-import logging
 import os
-from functools import wraps
 from pathlib import Path
 from threading import Lock
 from typing import Literal, TypedDict
@@ -15,12 +13,9 @@ from xpool.bootstrap import get_runtime_role
 from xpool.config import get_global_config
 from xpool.model import ModelId
 from xpool.native import RuntimeRole
-from xpool.runtime.atnagent import AtnAgentTransportRuntime
-from xpool.runtime.instance import InstanceRankRuntime
 from xpool.transport import TransportArenaHandle
 
 runtime_roles = frozenset({RuntimeRole.INSTANCE, RuntimeRole.ATNAGENT})
-logger = logging.getLogger(__name__)
 install_lock = Lock()
 installed = False
 transport_phases = (
@@ -125,62 +120,15 @@ def install() -> None:
 
 
 def install_atnagent_observer() -> None:
-    """Record every AtnAgent-local endpoint after resident quiesce."""
+    """Native Fabric finalization exports the borrowed Transport Source.
 
-    original_quiesce = AtnAgentTransportRuntime.quiesce
-
-    @wraps(original_quiesce)
-    def observed_quiesce(transport_runtime: AtnAgentTransportRuntime) -> None:
-        resources = transport_runtime.resources
-        original_quiesce(transport_runtime)
-        try:
-            snapshot = xpool.native.devkit.transport_observer.read()
-            if snapshot is None:
-                return
-            config = get_global_config()
-            resource_by_endpoint = {
-                (config.instance_by_model_id[resource.model_id].instance_index, resource.registration.rank): resource
-                for resource in resources
-            }
-            for endpoint in snapshot.endpoints:
-                resource = resource_by_endpoint[(endpoint.instance_index, endpoint.instance_rank)]
-                write_transport_snapshot(
-                    site="atnagent",
-                    model_id=resource.model_id,
-                    rank=resource.registration.rank,
-                    handle=resource.handle,
-                    snapshot=endpoint,
-                )
-        except Exception:
-            logger.warning("failed to record xpool transport observer snapshot", exc_info=True)
-
-    setattr(AtnAgentTransportRuntime, "quiesce", observed_quiesce)
+    Quiesce precedes cross-process Drain and must not start the additional
+    observation shutdown deadline while production is still retiring.
+    """
 
 
 def install_instance_observer() -> None:
-    """Record the Instance-local endpoint immediately before native detach."""
-
-    original_detach = InstanceRankRuntime.detach_arena
-
-    @wraps(original_detach)
-    def observed_detach(runtime: InstanceRankRuntime) -> None:
-        handle = runtime.arena_handle
-        if handle is not None:
-            try:
-                snapshot = xpool.native.devkit.transport_observer.read()
-                if snapshot is not None:
-                    write_transport_snapshot(
-                        site="instance",
-                        model_id=runtime.model_id,
-                        rank=runtime.rank,
-                        handle=handle,
-                        snapshot=snapshot.endpoints[0],
-                    )
-            except Exception:
-                logger.warning("failed to record xpool transport observer snapshot", exc_info=True)
-        original_detach(runtime)
-
-    setattr(InstanceRankRuntime, "detach_arena", observed_detach)
+    """Native EndpointClose performs export after its actual CUDA/Graph retirement."""
 
 
 def transport_phase_summary(records: list[TransportRecordJson]) -> dict[str, TransportPhaseSummaryJson]:

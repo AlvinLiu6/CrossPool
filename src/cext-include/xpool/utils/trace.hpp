@@ -7,6 +7,7 @@
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 #include <type_traits>
 
 #include <xpool/abort.hpp>
@@ -50,6 +51,24 @@ concept EventType = std::is_enum_v<Event> && requires { Event::Count; };
 /// Fixed-size event bitmap and timestamp array for one semantic trace.
 template <EventType Event> class Timeline {
 public:
+  /// Reconstruct retained Host evidence without requiring missing predecessors.
+  /// Presence preserves recorded raw zero; unrecorded timestamps must be zero.
+  /// The caller supplies only validated phase bits for this Timeline family.
+  static Timeline from_retained(std::array<std::uint64_t, static_cast<std::size_t>(Event::Count)> timestamps,
+                                std::uint64_t recorded) {
+    if constexpr (event_count < 64) {
+      if ((recorded >> event_count) != 0)
+        throw std::invalid_argument("xpool retained timeline mask exceeds its event family");
+    }
+    for (std::size_t i = 0; i < event_count; ++i)
+      if ((recorded & (std::uint64_t{1} << i)) == 0)
+        timestamps[i] = 0;
+    auto result = Timeline{};
+    result.recorded_events_ = recorded;
+    result.timestamps_ = timestamps;
+    return result;
+  }
+
   /// Record one event after verifying required predecessors.
   /// \param timestamp Device clock value associated with the event.
   template <Event Current, Event... Required> XPOOL_HOST_DEVICE_FN void record(std::uint64_t timestamp) {

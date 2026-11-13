@@ -18,6 +18,8 @@ class TransportArenaLease:
     device: int
     handle: TransportArenaHandle
     publisher: ProcUniqId
+    owner: ProcUniqId
+    abi_version: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +72,16 @@ class TransportBroker:
         if not state.accepting_leases:
             raise XpoolDaemonError("not_ready", "atnagent transport leases are quiescing")
         by_handle = {publication.handle.handle: instance for instance, publication in state.publications.items()}
+        by_endpoint = {
+            (region.owner_producer, region.endpoint_sequence): instance
+            for instance, publication in state.publications.items()
+            if (region := publication.handle.observation_region) is not None
+        }
+        by_observation_handle = {
+            region.handle: instance
+            for instance, publication in state.publications.items()
+            if (region := publication.handle.observation_region) is not None
+        }
         for publication in publications:
             existing = state.publications.get(publication.instance)
             if existing is not None and existing != publication:
@@ -77,6 +89,19 @@ class TransportBroker:
             handle_owner = by_handle.get(publication.handle.handle)
             if handle_owner is not None and handle_owner != publication.instance:
                 raise XpoolDaemonError("conflict", "atnagent transport arenas contain duplicate arena handle")
+            by_handle[publication.handle.handle] = publication.instance
+            region = publication.handle.observation_region
+            if region is not None:
+                endpoint = (region.owner_producer, region.endpoint_sequence)
+                if (
+                    by_endpoint.get(endpoint, publication.instance) != publication.instance
+                    or by_observation_handle.get(region.handle, publication.instance) != publication.instance
+                ):
+                    raise XpoolDaemonError(
+                        "conflict", "transport Arenas cannot share an observation Endpoint or handle"
+                    )
+                by_endpoint[endpoint] = publication.instance
+                by_observation_handle[region.handle] = publication.instance
         state.publications.update({publication.instance: publication for publication in publications})
 
     def quiesce(self, device: int, owner: ProcUniqId) -> None:
@@ -119,15 +144,26 @@ class TransportBroker:
                 existing.device == lease.device
                 and existing.handle == lease.handle
                 and existing.publisher == lease.publisher
+                and existing.owner == lease.owner
             ):
                 return
-            if now - last_seen_at <= heartbeat_timeout_s:
+            if existing.handle.observation_region is not None or now - last_seen_at <= heartbeat_timeout_s:
                 raise XpoolDaemonError("conflict", "instance rank already holds different transport arena handle")
         self.leases[instance] = lease
 
-    def remove_instance(self, instance: InstanceRankId) -> TransportArenaLease | None:
-        """Release and return daemon lease state when an Instance rank deregisters."""
+    def remove_instance(
+        self, instance: InstanceRankId, *, detached_owner: ProcUniqId | None = None
+    ) -> TransportArenaLease | None:
+        """Release lease state, retaining observed mappings until their exact owner reports detach.
 
+        Registration replacement supplies no detach proof. The Instance runtime
+        sends its existing deregistration RPC only after successful Native detach;
+        the control plane supplies that validated process identity here.
+        """
+
+        lease = self.leases.get(instance)
+        if lease is not None and lease.handle.observation_region is not None and detached_owner != lease.owner:
+            return None
         return self.leases.pop(instance, None)
 
     def leased_instances(self, device: int, publisher: ProcUniqId | None = None) -> list[InstanceRankId]:

@@ -13,6 +13,8 @@ from xpool.fabric import FabricGenerationPhase, FabricPlan, InstanceFfnProfile
 from xpool.model import ModelId
 from xpool.native import ABI_VERSION
 from xpool.native.ffn import ResultCode
+from xpool.observation import ObservationDeviceRequest, observation_enabled
+from xpool.runtime.observation import ObservationRuntime, prepare_observation
 from xpool.runtime.transport import InstanceRankTransportProfile
 from xpool.service.client import XpoolClient, XpoolClientError, XpoolDaemonError
 from xpool.service.wire import (
@@ -169,6 +171,10 @@ class InstanceRankHeartbeat:
         except XpoolClientError as exc:
             self.handle_transport_failure(exc)
         else:
+            if response.cleanup_deadline is not None and observation_enabled():
+                # Graph can be installed before the later Transport owner.
+                # Preserve the process bound before a terminal phase raises.
+                xpool.native.devkit.timeline.limit_retirement(max(0, int(response.cleanup_deadline * 1_000_000_000)))
             if response.fabric_phase in (FabricGenerationPhase.ABORTING, FabricGenerationPhase.STOPPED):
                 raise InstanceRankError(
                     f"instance {self.model_id} rank {self.rank} cannot continue fabric {response.fabric_phase.value}"
@@ -241,7 +247,10 @@ class InstanceRankRuntime:
         self.heartbeat_worker = None
         self.failure_monitor = None
         self.arena_handle = None
+        self.attachment_uncertain = False
+        self.last_endpoint_sequence = 0
         self.fabric_plan: FabricPlan | None = None
+        self.observation: ObservationRuntime | None = None
 
     @classmethod
     def start(
@@ -330,6 +339,7 @@ class InstanceRankRuntime:
                 )
             return
         registration = InstanceRankRegistration(
+            observation=ObservationDeviceRequest.current(),
             model_id=self.model_id,
             rank=self.rank,
             abi_version=ABI_VERSION,
@@ -360,6 +370,8 @@ class InstanceRankRuntime:
                     plan = self.client.fabric_plan()
                     if readiness.generation is None or plan.generation != readiness.generation:
                         raise InstanceRankError("daemon returned inconsistent executable Fabric generation facts")
+                    request = None if self.registration is None else self.registration.observation
+                    self.observation = prepare_observation(plan, request, self.observation)
                     self.fabric_plan = plan
                     return plan
                 case (
@@ -463,21 +475,62 @@ class InstanceRankRuntime:
     def attach_arena(self, handle: TransportArenaHandle) -> None:
         """Attach a daemon-brokered transport arena handle to the native shim."""
 
+        if self.attachment_uncertain:
+            raise InstanceRankError("uncertain native transport attachment requires process retirement")
         if self.arena_handle is not None:
             if self.arena_handle != handle:
                 raise InstanceRankError("instance transport arena is already attached with a different handle")
             return
-        xpool.native.transport.attach_arena(self.instance_index, self.rank, handle.handle)
+        observation = self.observation
+        region = handle.observation_region
+        if region is not None and region.endpoint_sequence <= self.last_endpoint_sequence:
+            raise InstanceRankError("reattachment requires a fresh Endpoint after observed detach")
+        if observation is not None:
+            observation.register_endpoint(
+                handle, self.instance_index, self.rank, self.process_ref.pid, observation.request
+            )
+        else:
+            handle.validate_observation(required=False, generation=0, owner_producer=0)
+        # Native attachment can fail after opening IPC or during fallback cleanup.
+        # An exception provides no proof that every mapping was actually closed.
+        self.attachment_uncertain = True
+        if observation is not None and observation.pool is not None:
+            region = handle.observation_region
+            if region is None:
+                raise InstanceRankError("prepared Transport requires an observation descriptor")
+            xpool.native.transport.attach_arena(
+                self.instance_index,
+                self.rank,
+                handle.handle,
+                observation.pool,
+                region.native(),
+                observation.generation,
+                observation.endpoint_owner(self.instance_index, self.rank),
+            )
+        else:
+            xpool.native.transport.attach_arena(self.instance_index, self.rank, handle.handle)
         self.arena_handle = handle
+        if region is not None:
+            self.last_endpoint_sequence = region.endpoint_sequence
+        self.attachment_uncertain = False
 
     def detach_arena(self) -> None:
-        """Detach this rank's native transport arena, if one is attached."""
+        """Detach after the caller destroys Graphs that captured this arena.
+
+        Observed native detach also waits for Graph/GraphExec references to
+        retire. Timeout or CUDA failure retains the registration and resources;
+        it requires process retirement and cannot be retried as a fresh detach.
+        """
 
         self.stop_failure_monitor()
+        if self.attachment_uncertain:
+            raise InstanceRankError("uncertain native transport attachment prevents deregistration")
         if self.arena_handle is None:
             return
+        self.attachment_uncertain = True
         xpool.native.transport.detach_arena()
         self.arena_handle = None
+        self.attachment_uncertain = False
 
     def attach_arena_from_daemon(self) -> None:
         """Acquire this rank's daemon-published arena and attach it natively."""
@@ -544,14 +597,17 @@ class InstanceRankRuntime:
     def close(self) -> None:
         """Release all runtime resources in dependency order.
 
-        Cleanup is idempotent after success. If native detach fails, the
-        registration and client remain available so the caller can retry.
+        Cleanup is idempotent after success. An uncertain native attach or
+        detach retains registration and client until process retirement; a
+        retry cannot establish that the earlier CUDA operation completed.
         """
 
         try:
             self.deregister_runtime()
         finally:
-            if self.registration is None and self.arena_handle is None:
+            if self.registration is None and self.arena_handle is None and not self.attachment_uncertain:
+                if self.observation is not None:
+                    self.observation.close()
                 self.client.close()
 
     def expect_transport(self, transport: InstanceRankTransportProfile) -> None:

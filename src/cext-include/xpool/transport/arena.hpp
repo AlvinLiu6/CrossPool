@@ -5,6 +5,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <optional>
 #include <utility>
 
 #include <c10/core/Device.h>
@@ -17,6 +19,7 @@
 #include <xpool/ffn.hpp>
 #include <xpool/macros.hpp>
 #include <xpool/transport/layout.hpp>
+#include <xpool/transport/observationpool.hpp>
 #include <xpool/transport/protocol.hpp>
 #include <xpool/utils/hex.hpp>
 
@@ -106,9 +109,12 @@ public:
   /// Construct an empty arena owner.
   Arena() = default;
   /// Return whether this owner contains a live mapping.
-  explicit operator bool() const noexcept { return base_ != nullptr; }
-  /// Best-effort fallback cleanup for a live mapping.
+  explicit operator bool() const noexcept { return base_ != nullptr || observation_pool_ != nullptr; }
+  /// Legacy fallback cleanup. Observed ownership requires explicit proven
+  /// retirement; destruction never releases its CUDA resources as a fallback.
   ~Arena() noexcept {
+    if (observation_pool_)
+      return;
     try {
       destroy();
     } catch (...) {
@@ -119,15 +125,25 @@ public:
   Arena &operator=(const Arena &) = delete;
   /// Move one arena owner and leave its source empty.
   Arena(Arena &&other) noexcept
-      : base_(std::exchange(other.base_, nullptr)), kind_(other.kind_), layout_(std::exchange(other.layout_, {})) {}
+      : base_(std::exchange(other.base_, nullptr)), kind_(other.kind_), layout_(std::exchange(other.layout_, {})),
+        observation_pool_(std::move(other.observation_pool_)), observation_(std::move(other.observation_)),
+        observation_host_(std::move(other.observation_host_)),
+        observation_control_(std::move(other.observation_control_)),
+        uncertain_(std::exchange(other.uncertain_, false)) {}
   /// Replace this empty owner by moving another arena owner.
   /// \throws c10::Error when the destination already owns a live mapping.
   Arena &operator=(Arena &&other) {
     if (this != &other) {
-      TORCH_CHECK(base_ == nullptr, "a live transport arena cannot be replaced by move");
+      TORCH_CHECK(!*this, "a live transport arena cannot be replaced by move");
       base_ = std::exchange(other.base_, nullptr);
       kind_ = other.kind_;
       layout_ = std::exchange(other.layout_, {});
+      observation_pool_ = std::move(other.observation_pool_);
+      observation_ = std::move(other.observation_);
+      observation_control_.reset();
+      observation_host_ = std::move(other.observation_host_);
+      observation_control_ = std::move(other.observation_control_);
+      uncertain_ = std::exchange(other.uncertain_, false);
     }
     return *this;
   }
@@ -136,13 +152,40 @@ public:
   static Arena create(c10::DeviceIndex device, const ArenaLayout &layout);
   /// Open one Instance-side CUDA IPC mapping.
   static Arena from_handle(const ArenaHandle &handle);
+  /// Initialize a stable owner before CUDA. Observed callers retain this object
+  /// even after failure, including a failure that returned no pointer. The
+  /// separate IPC word is allocated on this same cold Arena creation path.
+  /// \throws c10::Error or CollectionError on validation/admission/CUDA failure.
+  void allocate(c10::DeviceIndex device, const ArenaLayout &layout, std::shared_ptr<ObservationPool> pool = {},
+                std::uint64_t generation = 0);
+  /// Validate the descriptor before opening either mapping. Observed callers
+  /// install this object in their persistent attachment before calling open().
+  /// \throws c10::Error or CollectionError on mismatch or uncertain CUDA work.
+  void open(const ArenaHandle &handle, std::shared_ptr<ObservationPool> pool = {},
+            const std::optional<ObservationRegion> &descriptor = std::nullopt, std::uint64_t generation = 0,
+            std::uint64_t owner_producer = 0);
+  /// Immutable cold descriptor, or null for a plain Arena. No live word read.
+  std::optional<ObservationRegion> observation_region() const;
+  /// Borrow the prepared counter/word and immutable identity until proven
+  /// retirement. Plain Arenas return an empty view; uncertainty rejects.
+  ObservationView observation_view() const;
+  /// Borrow the common pool owner for Resident admission and retained arrays.
+  const std::shared_ptr<ObservationPool> &observation_pool() const noexcept { return observation_pool_; }
+  /// Mark failed work/cleanup as uncertain and stop new IPC pool admission.
+  /// The stable owner and its allocations must remain retained thereafter.
+  void quarantine() const;
+  /// True after uncertain observed work; subsequent cleanup cannot prove safety.
+  bool uncertain() const noexcept { return uncertain_; }
   /// Return a typed non-owning view over this mapping.
   ArenaView view() const { return ArenaView{base_}; }
   /// Return the device that owns this mapping.
   c10::DeviceIndex device() const;
   /// Release the owned allocation or attached IPC mapping.
   /// The release operation is selected by the mapping's ownership origin.
-  void destroy();
+  /// Observed allocations additionally require both local retirement and peer
+  /// detach; imports require local retirement. Missing proof or uncertainty
+  /// rejects before CUDA. A failed release retains ownership and charges.
+  void destroy(bool local_users_retired = false, bool peer_mappings_detached = false);
   /// Export the CUDA IPC handle for an owned arena.
   /// \throws c10::Error for an empty or attached mapping, or CUDA export failure.
   ArenaHandle handle() const;
@@ -161,12 +204,14 @@ public:
 private:
   /// Release behavior selected by the mapping's ownership origin.
   enum class Kind { Owned, Attached };
-  /// Construct one validated live arena owner.
-  Arena(std::uint8_t *base, Kind kind, ArenaLayout layout) : base_(base), kind_(kind), layout_(std::move(layout)) {}
-
   std::uint8_t *base_ = nullptr;
   Kind kind_ = Kind::Owned;
   ArenaLayout layout_{};
+  std::shared_ptr<ObservationPool> observation_pool_;
+  std::shared_ptr<ObservationPool::Region> observation_;
+  std::shared_ptr<xpool::devkit::timeline::MemoryBudget> observation_host_;
+  xpool::devkit::timeline::MemoryBudget::Reservation observation_control_;
+  mutable bool uncertain_ = false;
 };
 
 } // namespace xpool::transport

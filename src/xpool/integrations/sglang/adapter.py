@@ -14,6 +14,7 @@ from sglang.srt.distributed.parallel_state import GroupCoordinator
 from sglang.srt.layers.communicator import LayerScatterModes, ScatterMode
 from sglang.srt.layers.dp_attention import compute_dp_attention_world_info
 from sglang.srt.model_executor.model_runner import ModelRunner
+from sglang.srt.model_executor.runner.base_cuda_graph_runner import BaseCudaGraphRunner
 from sglang.srt.runtime_context import get_device, get_parallel
 from torch import nn
 
@@ -262,10 +263,15 @@ class SglangInstanceRankRuntime:
     def detach(self, model_runner: ModelRunner) -> None:
         """Drain local device work before releasing this runner's resources.
 
-        Failed synchronization retains the attachment and its live resources.
+        Failed synchronization or Graph cleanup retains the attachment and
+        its live resources. Engine Host cleanup alone does not destroy Graphs.
         """
 
         torch.cuda.synchronize(self.binding.worker_rank)
+        for phase in ("decode", "prefill"):
+            runner = getattr(model_runner, f"{phase}_cuda_graph_runner", None)
+            if isinstance(runner, BaseCudaGraphRunner):
+                runner.backend.cleanup()
         if self.kv_capacity is not None:
             self.kv_capacity.close()
             self.kv_capacity = None

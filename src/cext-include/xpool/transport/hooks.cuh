@@ -25,6 +25,8 @@ struct TransportInstanceProtocolEvent::Context {
   const xpool::transport::RequestMetadata *request = nullptr;
   /// Result code for ResultObserved and Closed; otherwise the sentinel default.
   xpool::ffn::ResultCode result_code{xpool::ffn::ResultCode::ProtocolMismatch};
+  /// Identity copied at successful Claim; stable after acknowledgement/reuse.
+  xpool::transport::OperationFact operation{};
 };
 
 /// Device context for one AtnAgent-side Transport protocol observation.
@@ -39,6 +41,8 @@ struct TransportAtnAgentProtocolEvent::Context {
   const xpool::transport::RequestMetadata *request = nullptr;
   /// Result code for ResultPublished; otherwise the sentinel default.
   xpool::ffn::ResultCode result_code{xpool::ffn::ResultCode::ProtocolMismatch};
+  /// Identity copied at Published before validation or result publication.
+  xpool::transport::OperationFact operation{};
 };
 
 } // namespace xpool::hooks

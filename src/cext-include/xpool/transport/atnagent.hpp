@@ -5,6 +5,8 @@
 
 #include <cstddef>
 #include <map>
+#include <memory>
+#include <memory_resource>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -16,17 +18,25 @@
 
 #include <xpool/fabric/arena.hpp>
 #include <xpool/transport/arena.hpp>
-#include <xpool/utils/device.hpp>
 
 namespace xpool::transport {
 
 /// Launch one cooperative Transport Resident over an immutable arena array.
 /// \pre arenas is non-empty and state and stream are non-null.
+/// \pre observations is empty when disabled; otherwise its entries match
+/// arenas in count and order, and their owners outlive the Resident.
 /// \pre Cooperative launch is supported and the complete grid is concurrently
 /// resident; capability and occupancy failures occur before launch.
 /// \throws c10::Error when capability, occupancy, or launch checks fail.
 void launch_resident_kernel(cuda::std::span<const ArenaView> arenas, xpool::fabric::ArenaView fabric_arena,
-                            ResidentState *state, cudaStream_t stream);
+                            ResidentState *state, cudaStream_t stream,
+                            cuda::std::span<const ObservationView> observations = {});
+
+/// Actual aligned Device allocations of an observed Resident: Arena pointers,
+/// drain state and the private observation table. Preparation adds this once
+/// to the Region pool demand before starting CUDA. This query performs no CUDA.
+/// \throws timeline::CollectionError resource_budget on zero/overflow.
+std::size_t resident_observation_device_bytes(std::size_t arena_count);
 
 /// Process-lifetime owner of all Transport arenas and one AtnAgent Resident.
 ///
@@ -53,7 +63,11 @@ public:
   ArenaHandle create_arena(c10::DeviceIndex device, std::size_t instance_index, std::size_t instance_rank,
                            std::size_t payload_row_capacity, std::size_t hidden_size, c10::ScalarType payload_dtype,
                            std::size_t atn_tp_rank, std::size_t atn_tp_size, std::size_t atn_dp_rank,
-                           std::size_t atn_dp_size);
+                           std::size_t atn_dp_size, std::shared_ptr<ObservationPool> observation_pool = {},
+                           std::uint64_t generation = 0);
+  /// Return the immutable observation descriptor belonging to this exact Arena.
+  /// Plain Arenas return null; unknown handles reject. No live Device read.
+  std::optional<ObservationRegion> observation_region(const ArenaHandle &handle) const;
 
   /// Freeze the arena set and launch its sole cooperative Resident.
   ///
@@ -77,13 +91,17 @@ public:
   /// Destroy known arenas during preactivation rollback or after Resident drain.
   /// \throws c10::Error after attempting every requested cleanup when any
   /// release fails.
-  void destroy_arenas(std::span<const ArenaHandle> handles);
+  /// Observed allocations also require the caller's confirmed closed lease
+  /// admission and actual peer detach. Missing proof retains every allocation.
+  void destroy_arenas(std::span<const ArenaHandle> handles, bool peer_mappings_detached = false);
 
 private:
-  class Resident {
+  class Resident : public std::enable_shared_from_this<Resident> {
   public:
-    Resident(c10::DeviceIndex device, std::span<const ArenaView> arenas, xpool::fabric::ArenaView fabric_arena);
-    ~Resident();
+    // Host-only preparation; install the stable owner before initialize().
+    Resident(c10::DeviceIndex device, const std::map<ArenaHandle, Arena> &arenas,
+             std::shared_ptr<ObservationPool> pool);
+    ~Resident() = default;
 
     Resident(const Resident &) = delete;
     Resident &operator=(const Resident &) = delete;
@@ -92,31 +110,50 @@ private:
 
     bool pending() const;
     bool host_drain_requested() const { return host_drain_requested_; }
-    bool released() const { return state_ == nullptr; }
+    bool released() const { return released_; }
+    void initialize(xpool::fabric::ArenaView fabric_arena);
+    void quarantine() const;
     void request_drain();
     void release();
 
   private:
     c10::DeviceIndex device_;
-    cuda::std::span<ArenaView> arenas_{};
+    std::shared_ptr<ObservationPool> pool_;
+    // Installed before CUDA; only proven release breaks this retention.
+    std::shared_ptr<Resident> retained_;
+    xpool::devkit::timeline::MemoryBudget::Reservation device_control_;
+    std::pmr::vector<ArenaView> host_arenas_;
+    std::pmr::vector<ObservationView> host_observations_;
+    ArenaView *arenas_ = nullptr;
+    ObservationView *observations_ = nullptr;
     ResidentState *state_ = nullptr;
-    xpool::utils::device::OwnedCudaStream control_stream_;
-    xpool::utils::device::OwnedCudaStream resident_stream_;
+    ResidentState initial_state_{};
+    std::size_t arena_bytes_ = 0;
+    std::size_t state_bytes_ = 0;
+    std::size_t observation_bytes_ = 0;
+    // Raw handles stay in this stable owner even if creation reports an error.
+    cudaStream_t control_stream_ = nullptr;
+    cudaStream_t resident_stream_ = nullptr;
     bool host_drain_requested_ = false;
+    bool initialized_ = false;
+    bool released_ = false;
+    mutable bool uncertain_ = false;
   };
 
   AtnAgentRuntime() = default;
   ~AtnAgentRuntime() = default;
 
   bool generation_failed() const;
-  std::vector<ArenaView> ordered_views() const;
   Arena &arena(const ArenaHandle &handle);
   const Arena &arena(const ArenaHandle &handle) const;
 
   mutable std::mutex mutex_;
   std::optional<c10::DeviceIndex> device_;
   std::map<ArenaHandle, Arena> arenas_;
-  std::optional<Resident> resident_;
+  Arena pending_arena_;
+  std::shared_ptr<xpool::devkit::timeline::MemoryBudget> pending_host_;
+  xpool::devkit::timeline::MemoryBudget::Reservation pending_control_;
+  std::shared_ptr<Resident> resident_;
 };
 
 } // namespace xpool::transport

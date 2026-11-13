@@ -56,15 +56,18 @@ XPOOL_DEVICE_FN bool request_valid(const ArenaView &arena) {
 // Validate and dispatch one published mailbox request to Fabric.
 XPOOL_DEVICE_FN xpool::ffn::ResultCode execute_request(const cooperative_groups::thread_block &group,
                                                        const ArenaView &transport_arena,
-                                                       const xpool::fabric::ArenaView &fabric_arena) {
+                                                       const xpool::fabric::ArenaView &fabric_arena,
+                                                       const OperationFact &operation) {
   if (!request_valid(transport_arena)) {
     const auto result = xpool::ffn::ResultCode::ProtocolMismatch;
     if (group.thread_rank() == 0) {
+      auto result_context = xpool::hooks::TransportAtnAgentProtocolEvent::Context{
+          .arena = transport_arena,
+          .kind = xpool::hooks::TransportProtocolEventKind::ResultPublished,
+          .result_code = result,
+          .operation = operation};
       transport_arena.mailbox().publish_result(result);
-      xpool::hooks::TransportAtnAgentProtocolEvent::hooks(
-          {.arena = transport_arena,
-           .kind = xpool::hooks::TransportProtocolEventKind::ResultPublished,
-           .result_code = result});
+      xpool::hooks::TransportAtnAgentProtocolEvent::hooks(result_context);
     }
     group.sync();
     return result;
@@ -72,18 +75,24 @@ XPOOL_DEVICE_FN xpool::ffn::ResultCode execute_request(const cooperative_groups:
 
   if (group.thread_rank() == 0) {
     xpool::hooks::TransportAtnAgentProtocolEvent::hooks(
-        {.arena = transport_arena, .kind = xpool::hooks::TransportProtocolEventKind::ExecutionStarted});
+        {.arena = transport_arena,
+         .kind = xpool::hooks::TransportProtocolEventKind::ExecutionStarted,
+         .operation = operation});
   }
   group.sync();
   const auto result = xpool::fabric::atnagent::execute(fabric_arena, transport_arena);
   if (group.thread_rank() == 0) {
     xpool::hooks::TransportAtnAgentProtocolEvent::hooks(
-        {.arena = transport_arena, .kind = xpool::hooks::TransportProtocolEventKind::ExecutionCompleted});
-    transport_arena.mailbox().publish_result(result);
-    xpool::hooks::TransportAtnAgentProtocolEvent::hooks(
         {.arena = transport_arena,
-         .kind = xpool::hooks::TransportProtocolEventKind::ResultPublished,
-         .result_code = result});
+         .kind = xpool::hooks::TransportProtocolEventKind::ExecutionCompleted,
+         .operation = operation});
+    auto result_context = xpool::hooks::TransportAtnAgentProtocolEvent::Context{
+        .arena = transport_arena,
+        .kind = xpool::hooks::TransportProtocolEventKind::ResultPublished,
+        .result_code = result,
+        .operation = operation};
+    transport_arena.mailbox().publish_result(result);
+    xpool::hooks::TransportAtnAgentProtocolEvent::hooks(result_context);
   }
   group.sync();
   return result;
@@ -91,7 +100,8 @@ XPOOL_DEVICE_FN xpool::ffn::ResultCode execute_request(const cooperative_groups:
 
 // Drive one mailbox to Closed during Resident drain, publishing a terminal
 // result for a request that was already visible to the Resident.
-XPOOL_DEVICE_FN void finish_terminal_mailbox(const cooperative_groups::thread_block &group, const ArenaView &arena) {
+XPOOL_DEVICE_FN void finish_terminal_mailbox(const cooperative_groups::thread_block &group, const ArenaView &arena,
+                                             const ObservationView &observation) {
   if (group.thread_rank() == 0) {
     while (true) {
       const auto status = arena.mailbox().observe();
@@ -102,16 +112,22 @@ XPOOL_DEVICE_FN void finish_terminal_mailbox(const cooperative_groups::thread_bl
         continue;
       }
       if (status == MailboxStatus::Published) {
+        const auto operation = observation.observe();
         xpool::hooks::TransportAtnAgentProtocolEvent::hooks(
             {.arena = arena,
              .kind = xpool::hooks::TransportProtocolEventKind::RequestObserved,
              .payload_rows = arena.mailbox().payload_rows,
-             .request = &arena.mailbox().request});
+             .request = &arena.mailbox().request,
+             .operation = operation});
         const auto failure = arena.generation_failure();
         const auto result = failure != xpool::ffn::ResultCode::Ok ? failure : xpool::ffn::ResultCode::Shutdown;
+        auto result_context = xpool::hooks::TransportAtnAgentProtocolEvent::Context{
+            .arena = arena,
+            .kind = xpool::hooks::TransportProtocolEventKind::ResultPublished,
+            .result_code = result,
+            .operation = operation};
         arena.mailbox().publish_result(result);
-        xpool::hooks::TransportAtnAgentProtocolEvent::hooks(
-            {.arena = arena, .kind = xpool::hooks::TransportProtocolEventKind::ResultPublished, .result_code = result});
+        xpool::hooks::TransportAtnAgentProtocolEvent::hooks(result_context);
         break;
       }
       xpool::abort_if(status == MailboxStatus::Dormant);
@@ -124,10 +140,12 @@ XPOOL_DEVICE_FN void finish_terminal_mailbox(const cooperative_groups::thread_bl
 // Run one cooperative Transport Resident grid with exactly one block owning
 // each rank-local arena mailbox and one process-wide drain state.
 XPOOL_KERNEL_FN void transport_resident_kernel(cuda::std::span<const ArenaView> arenas,
-                                               xpool::fabric::ArenaView fabric_arena, ResidentState *resident_state) {
+                                               xpool::fabric::ArenaView fabric_arena, ResidentState *resident_state,
+                                               cuda::std::span<const ObservationView> observations) {
   const auto grid = cooperative_groups::this_grid();
   const auto group = cooperative_groups::this_thread_block();
   const auto arena = arenas[grid.block_rank()];
+  const auto observation = observations.empty() ? ObservationView{} : observations[grid.block_rank()];
   XPOOL_DEVICE_SHARED bool stop;
   XPOOL_DEVICE_SHARED MailboxStatus status;
 
@@ -156,7 +174,7 @@ XPOOL_KERNEL_FN void transport_resident_kernel(cuda::std::span<const ArenaView> 
         arena.publish_shutdown();
       }
       group.sync();
-      finish_terminal_mailbox(group, arena);
+      finish_terminal_mailbox(group, arena, observation);
       break;
     }
 
@@ -174,15 +192,18 @@ XPOOL_KERNEL_FN void transport_resident_kernel(cuda::std::span<const ArenaView> 
       continue;
     }
 
+    auto operation = OperationFact{};
     if (group.thread_rank() == 0) {
+      operation = observation.observe();
       xpool::hooks::TransportAtnAgentProtocolEvent::hooks(
           {.arena = arena,
            .kind = xpool::hooks::TransportProtocolEventKind::RequestObserved,
            .payload_rows = arena.mailbox().payload_rows,
-           .request = &arena.mailbox().request});
+           .request = &arena.mailbox().request,
+           .operation = operation});
     }
     group.sync();
-    const auto result = execute_request(group, arena, fabric_arena);
+    const auto result = execute_request(group, arena, fabric_arena, operation);
     if (publish_fabric_failure(arena, fabric_arena) || result == xpool::ffn::ResultCode::ProtocolMismatch ||
         result == xpool::ffn::ResultCode::Timeout) {
       if (group.thread_rank() == 0) {
@@ -199,7 +220,10 @@ XPOOL_KERNEL_FN void transport_resident_kernel(cuda::std::span<const ArenaView> 
 } // namespace
 
 void launch_resident_kernel(cuda::std::span<const ArenaView> arenas, xpool::fabric::ArenaView fabric_arena,
-                            ResidentState *state, cudaStream_t stream) {
+                            ResidentState *state, cudaStream_t stream,
+                            cuda::std::span<const ObservationView> observations) {
+  TORCH_CHECK(observations.empty() || observations.size() == arenas.size(),
+              "xpool Resident observation table must match its Arena order and count");
   auto device = 0;
   C10_CUDA_CHECK(cudaGetDevice(&device));
   auto cooperative_launch = 0;
@@ -218,7 +242,7 @@ void launch_resident_kernel(cuda::std::span<const ArenaView> arenas, xpool::fabr
 
   const auto config =
       cuda::make_config(cuda::block_dims<kBlockSize>(), cuda::grid_dims(arenas.size()), cuda::cooperative_launch{});
-  cuda::launch(cuda::stream_ref{stream}, config, transport_resident_kernel, arenas, fabric_arena, state);
+  cuda::launch(cuda::stream_ref{stream}, config, transport_resident_kernel, arenas, fabric_arena, state, observations);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 

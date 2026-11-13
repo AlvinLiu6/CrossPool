@@ -16,6 +16,8 @@ namespace xpool::devkit::fabric_observer {
 
 /// Device adapter that records Fabric protocol transitions.
 struct DeviceAdapter {
+  /// Prepare the shared operation identity before either AtnAgent listener.
+  static XPOOL_DEVICE_HOOK_FN(xpool::hooks::FabricAtnAgentProtocolEvent, prepare, context);
   /// Record an AtnAgent-side transition.
   static XPOOL_DEVICE_HOOK_FN(xpool::hooks::FabricAtnAgentProtocolEvent, observe, context);
   /// Record a Coordinator-side transition.

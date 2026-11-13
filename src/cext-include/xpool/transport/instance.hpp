@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <optional>
 
@@ -28,6 +29,8 @@ struct Request {
   const at::Tensor &output;
   /// Request identity and parallelism metadata.
   const RequestMetadata &request_metadata;
+  /// Stable observation borrow captured with the kernel, empty when disabled.
+  ObservationView observation{};
 };
 
 /// Launch one Instance-side transport kernel.
@@ -54,10 +57,18 @@ public:
   InstanceRankRuntime(InstanceRankRuntime &&) = delete;
   InstanceRankRuntime &operator=(InstanceRankRuntime &&) = delete;
 
-  /// Open the process's sole CUDA IPC transport attachment.
-  void attach_arena(std::size_t instance_index, std::size_t rank, const ArenaHandle &handle);
+  /// Open the process's sole CUDA IPC transport attachment. Live exact retries
+  /// are idempotent. After observed detach, require a fresh, increasing Endpoint
+  /// from the same prepared owner and pool; a retired counter cannot restart.
+  void attach_arena(std::size_t instance_index, std::size_t rank, const ArenaHandle &handle,
+                    std::shared_ptr<ObservationPool> observation_pool = {},
+                    const std::optional<ObservationRegion> &descriptor = std::nullopt, std::uint64_t generation = 0,
+                    std::uint64_t owner_producer = 0);
 
-  /// Synchronize, close, and clear the process's attachment.
+  /// Retire captured references, synchronize, close, and clear the attachment.
+  /// Callers destroy every capturing Graph/GraphExec before observed detach.
+  /// A bounded Graph retirement timeout retains mappings and their charges,
+  /// stops the attachment, and requires process retirement.
   /// \post No attachment remains after successful cleanup.
   void detach_arena();
 
@@ -79,13 +90,16 @@ private:
     Attachment(Attachment &&) = delete;
     Attachment &operator=(Attachment &&) = delete;
 
-    /// Return whether this attachment owns an open CUDA IPC mapping.
-    explicit operator bool() const noexcept { return static_cast<bool>(arena_); }
+    /// Return whether this attachment may serve new requests or reads. Failed
+    /// detach retains its mapping but makes subsequent use unavailable.
+    explicit operator bool() const noexcept { return ready_ && !arena_.uncertain() && static_cast<bool>(arena_); }
 
     /// Open or validate this process's transport attachment.
-    void attach(std::size_t instance_index, std::size_t rank, const ArenaHandle &handle);
+    void attach(std::size_t instance_index, std::size_t rank, const ArenaHandle &handle,
+                std::shared_ptr<ObservationPool> observation_pool, const std::optional<ObservationRegion> &descriptor,
+                std::uint64_t generation, std::uint64_t owner_producer);
 
-    /// Synchronize and close this process's transport attachment.
+    /// Retire Graph references, synchronize, and close this attachment.
     void detach();
 
     /// Return whether the live attachment has the supplied identity.
@@ -102,8 +116,18 @@ private:
                 const at::Tensor &output, const xpool::transport::RequestMetadata &request_metadata) const;
 
   private:
+    class GraphUse;
+
+    // One prepared identity domain survives explicit detach. Its Host charge
+    // covers Attachment storage outside the separately charged Arena object.
+    std::shared_ptr<ObservationPool> prepared_pool_;
+    xpool::devkit::timeline::MemoryBudget::Reservation control_;
+    std::uint64_t endpoint_owner_ = 0;
+    std::uint64_t last_endpoint_sequence_ = 0;
     ArenaHandle handle_;
     Arena arena_;
+    std::shared_ptr<GraphUse> graph_use_;
+    bool ready_ = false;
   };
 
   InstanceRankRuntime() = default;

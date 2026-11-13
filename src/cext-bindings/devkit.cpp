@@ -9,6 +9,9 @@
 #include <xpool/devkit/fabric_observer.hpp>
 #include <xpool/devkit/ffn_routing_observer.hpp>
 #include <xpool/devkit/graph_observer.hpp>
+#include <xpool/devkit/timeline/fabricruntime.hpp>
+#include <xpool/devkit/timeline/graphsession.hpp>
+#include <xpool/devkit/timeline/transportruntime.hpp>
 #include <xpool/devkit/transport_observer.hpp>
 #include <xpool/runtime.hpp>
 
@@ -238,6 +241,60 @@ void bind_devkit(py::module_ &module) {
   auto routing = devkit.def_submodule("ffn_routing_observer", "FfnAgent routing observation.");
   auto transport = devkit.def_submodule("transport_observer", "Per-process Transport protocol observation.");
 
+  using namespace xpool::devkit::timeline;
+  py::class_<GraphLogSession, std::shared_ptr<GraphLogSession>>(graph, "LogSession",
+                                                                "Bounded background Host Graph JSONL lifetime.")
+      .def("record", &GraphLogSession::record, py::arg("phase"), py::arg("kind"), py::arg("backend"),
+           py::arg("time_ns"), "Try one bounded enqueue while retaining the GIL; false records a drop or closure.")
+      .def(
+          "close",
+          [](GraphLogSession &session) {
+            // Every Python enqueue retains the GIL, so closing admission while it
+            // is held proves prior Graph enqueue calls retired. The shared service
+            // keeps raw/Device sources live until their runtime supplies its proof.
+            session.stop();
+            const auto released = py::gil_scoped_release{};
+            return session.close(true);
+          },
+          "Stop Graph admission within the first process deadline; raw producers require separate retirement.")
+      .def(
+          "report",
+          [](const GraphLogSession &session) {
+            const auto value = session.report();
+            auto result = py::dict{};
+            result["attempted"] = value.attempted;
+            result["accepted"] = value.accepted;
+            result["dropped_full"] = value.dropped_full;
+            result["dropped_contention"] = value.dropped_contention;
+            result["dropped_input"] = value.dropped_input;
+            result["copied"] = value.copied;
+            result["written"] = value.written;
+            result["lost"] = value.lost;
+            result["counter_exhausted"] = value.counter_exhausted;
+            result["closed"] = value.closed;
+            result["finished"] = value.finished;
+            result["error"] = py::none();
+            if (value.error)
+              result["error"] = py::str(collection_error_name(*value.error));
+            return result;
+          },
+          "Return cumulative compatibility counters; exact after close joins both workers.");
+  graph.def(
+      "prepare_log",
+      [](std::string_view path, std::size_t host_bytes, std::uint64_t disk_bytes, std::uint64_t metadata_reserve_bytes,
+         std::uint64_t interval_ms, std::uint64_t shutdown_wait_ms) {
+        const auto options = Options{.host_bytes = host_bytes,
+                                     .collection_interval_ms = interval_ms,
+                                     .disk_bytes = disk_bytes,
+                                     .metadata_reserve_bytes = metadata_reserve_bytes,
+                                     .shutdown_wait_ms = shutdown_wait_ms};
+        return GraphLogSession::create(path, options);
+      },
+      py::arg("path"), py::arg("host_bytes"), py::arg("disk_bytes"), py::arg("metadata_reserve_bytes"),
+      py::arg("interval_ms"), py::arg("shutdown_wait_ms"),
+      "Prepare Graph logging on the shared process Collector/Writer before raw startup; initializes no CUDA.");
+
+  bind_timeline(devkit);
   bind_fabric_observer_types(fabric);
   bind_transport_observer_types(transport);
 
@@ -296,6 +353,63 @@ void bind_devkit(py::module_ &module) {
           },
           "Retained routing records in reservation order.");
 
+  py::class_<xpool::devkit::timeline::FabricProgress>(fabric, "RecordingProgress",
+                                                      "Last completed Device sample; active counts are lower bounds.")
+      .def_readonly("operations", &xpool::devkit::timeline::FabricProgress::operations,
+                    "Original operation attempts in the completed Device sample.")
+      .def_readonly("dropped", &xpool::devkit::timeline::FabricProgress::dropped,
+                    "Original operations excluded by the legacy record capacity.")
+      .def_readonly("diagnostics", &xpool::devkit::timeline::FabricProgress::diagnostics,
+                    "Sticky bitset of recording diagnostics observed by collection.")
+      .def_readonly("counter_exhausted", &xpool::devkit::timeline::FabricProgress::counter_exhausted,
+                    "An operation counter saturated; totals are no longer exact.")
+      .def_readonly("identity_exhausted", &xpool::devkit::timeline::FabricProgress::identity_exhausted,
+                    "The original operation identity space was exhausted without wrapping.")
+      .def_readonly("exact", &xpool::devkit::timeline::FabricProgress::exact,
+                    "The sample has an exact operation count at a proven collection cutoff.");
+  py::class_<xpool::devkit::timeline::SnapshotExportReport>(
+      fabric, "ExportReport", "Bounded background publication status, separate from memory release.")
+      .def_readonly("accepted", &xpool::devkit::timeline::SnapshotExportReport::accepted,
+                    "Accepted immutable reads, excluding busy mailbox rejections.")
+      .def_readonly("published", &xpool::devkit::timeline::SnapshotExportReport::published,
+                    "Snapshot and evidence pairs whose two replacements succeeded.")
+      .def_readonly("pending", &xpool::devkit::timeline::SnapshotExportReport::pending,
+                    "A read remains queued or held by the Writer.")
+      .def_readonly("closed", &xpool::devkit::timeline::SnapshotExportReport::closed,
+                    "The mailbox no longer accepts new reads.")
+      .def_readonly("error", &xpool::devkit::timeline::SnapshotExportReport::error,
+                    "Sticky publication failure, or None when no failure was observed.");
+  fabric.def(
+      "prepare",
+      [](std::shared_ptr<xpool::devkit::timeline::MetadataRegistry> metadata, std::uint64_t generation,
+         const xpool::fabric::ArenaProjection &projection, int pe, const std::string &outdir) {
+        auto &runtime = xpool::RuntimeState::singleton();
+        runtime.require_role({xpool::RuntimeRole::AtnAgent, xpool::RuntimeRole::FfnAgent},
+                             "xpool.native.devkit.fabric_observer.prepare");
+        TORCH_CHECK(pe >= 0 && ((runtime.role() == xpool::RuntimeRole::AtnAgent) ==
+                                (static_cast<std::size_t>(pe) < projection.atnagent_count)),
+                    "xpool Fabric observation PE differs from the initialized runtime role");
+        xpool::devkit::fabric_observer::prepare(std::move(metadata), generation, projection, pe,
+                                                runtime.device("xpool.native.devkit.fabric_observer.prepare"), outdir);
+      },
+      py::arg("metadata"), py::arg("generation"), py::arg("projection"), py::arg("pe"), py::arg("outdir"),
+      "Admit the actual participant before join; install its view only at real join.",
+      py::call_guard<py::gil_scoped_release>());
+  fabric.def("export_snapshot", &xpool::devkit::fabric_observer::export_snapshot,
+             "At actual local drain, queue one fresh snapshot for the background Writer.",
+             py::call_guard<py::gil_scoped_release>());
+  fabric.def("cancel_preparation", &xpool::devkit::fabric_observer::cancel_preparation,
+             "Release never-activated cold preparation; false retains an owner needing production retirement.",
+             py::call_guard<py::gil_scoped_release>());
+  fabric.def("finish_retirement", &xpool::devkit::fabric_observer::finish_retirement,
+             "Join observation workers after Device retirement without renewing the deadline; false retains storage.",
+             py::call_guard<py::gil_scoped_release>());
+  fabric.def("recording_progress", &xpool::devkit::fabric_observer::recording_progress,
+             "Read the last completed bounded diagnostic sample without synchronizing CUDA.",
+             py::call_guard<py::gil_scoped_release>());
+  fabric.def("export_report", &xpool::devkit::fabric_observer::export_report,
+             "Read snapshot publication progress or its retained final result after owner release.",
+             py::call_guard<py::gil_scoped_release>());
   fabric.def(
       "read",
       []() {
@@ -326,6 +440,18 @@ void bind_devkit(py::module_ &module) {
       "Return the current process-local routing snapshot, if enabled.", py::call_guard<py::gil_scoped_release>());
   routing.def("allocation_bytes", &xpool::devkit::ffn_routing_observer::allocation_bytes, py::arg("element_capacity"),
               "Return the optional process-local Routing Observer allocation size.");
+
+  transport.def("prepare_endpoint", &xpool::devkit::transport_observer::prepare_endpoint, py::arg("metadata"),
+                py::arg("region"), py::arg("instance_index"), py::arg("rank"), py::arg("device"), py::arg("atnagent"),
+                py::arg("pid"), py::arg("model_id"), py::arg("arena_suffix"), py::arg("path"),
+                "Admit and install one registered Transport Endpoint before publication/attachment.",
+                py::call_guard<py::gil_scoped_release>());
+  transport.def("export_snapshot", &xpool::devkit::transport_observer::export_snapshot,
+                "Enqueue same-cutoff snapshots after actual endpoint quiescence.",
+                py::call_guard<py::gil_scoped_release>());
+  transport.def("finish_retirement", &xpool::devkit::transport_observer::finish_retirement,
+                "Join after actual endpoint close; false retains unfinished owners.",
+                py::call_guard<py::gil_scoped_release>());
 
   transport.def(
       "read",

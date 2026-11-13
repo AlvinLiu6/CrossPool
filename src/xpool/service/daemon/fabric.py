@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import NoReturn
+from typing import Literal, NoReturn
 
 from xpool import ffn
 from xpool.config import XpoolConfig
@@ -18,6 +18,7 @@ from xpool.fabric import (
     FabricRole,
     InstanceRankTopology,
 )
+from xpool.observation import ObservationDeviceRequest
 from xpool.service.daemon.registration import InstanceRankId, RegistrationBook
 from xpool.service.errors import XpoolDaemonError
 from xpool.service.wire import (
@@ -50,6 +51,9 @@ class FabricMembership:
     pe_placements: tuple[FabricPePlacement, ...]
     agent_owners: tuple[tuple[int, ProcUniqId], ...]
     instance_owners: tuple[tuple[InstanceRankId, ProcUniqId], ...]
+    observation_members: tuple[
+        tuple[ProcUniqId, ObservationDeviceRequest | None, Literal["instance", "atnagent", "ffnagent"]], ...
+    ] = ()
 
     @classmethod
     def capture(
@@ -148,6 +152,17 @@ class FabricMembership:
             pe_placements=placements,
             agent_owners=agent_owners,
             instance_owners=tuple(instance_owners),
+            observation_members=tuple(
+                (registration.proc, registration.observation, "atnagent")
+                for registration in atnagent_by_device.values()
+            )
+            + tuple(
+                (registration.proc, registration.observation, "ffnagent")
+                for registration in ffnagent_by_device.values()
+            )
+            + tuple(
+                (registration.proc, registration.observation, "instance") for registration in instance_by_rank.values()
+            ),
         )
 
     def owners(self) -> tuple[ProcUniqId, ...]:

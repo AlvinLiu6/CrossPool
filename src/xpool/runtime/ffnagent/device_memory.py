@@ -186,7 +186,7 @@ class DeviceMemoryEstimator:
         return xpool.native.devkit.ffn_routing_observer.allocation_bytes(element_capacity)
 
     def fabric_observer_bytes(self) -> int:
-        """Return exact optional Fabric Observer allocation bytes."""
+        """Reserve the largest Fabric recording role layout; Native preparation admits the actual PE."""
 
         return xpool.native.devkit.fabric_observer.allocation_bytes(
             len(self.model_specs),

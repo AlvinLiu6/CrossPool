@@ -8,6 +8,10 @@
 
 namespace xpool::hooks {
 
+XPOOL_DEVICE_FN inline void FabricAtnAgentProtocolEvent::prepare(Context &context) {
+  xpool::devkit::fabric_observer::DeviceAdapter::prepare(context);
+}
+
 /// Dispatch a Device hook Point through the built-in adapter catalog.
 /// \param context Point-specific Context passed by the production call site.
 /// \return The Point result.

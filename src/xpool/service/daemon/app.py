@@ -380,6 +380,7 @@ def create_daemon() -> FastAPI:
             control_plane.register_atnagent,
             AtnAgentRegistrationState(
                 device=request.device,
+                observation=request.observation,
                 abi_version=request.abi_version,
                 pid=request.pid,
                 now=monotonic(),
@@ -414,6 +415,7 @@ def create_daemon() -> FastAPI:
             control_plane.register_ffnagent,
             FfnAgentRegistrationState(
                 device=request.device,
+                observation=request.observation,
                 device_total_memory_bytes=request.device_total_memory_bytes,
                 device_free_memory_bytes=request.device_free_memory_bytes,
                 abi_version=request.abi_version,
@@ -491,6 +493,7 @@ def create_daemon() -> FastAPI:
             control_plane.register_instance,
             InstanceRankRegistrationState(
                 instance=InstanceRankId(model_id=request.model_id, rank=request.rank),
+                observation=request.observation,
                 abi_version=request.abi_version,
                 pid=request.pid,
                 transport=request.transport,

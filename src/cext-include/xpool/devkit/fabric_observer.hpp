@@ -5,16 +5,23 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
+#include <utility>
 #include <vector>
 
 #include <cuda/std/variant>
 
 #include <xpool/abort.hpp>
+#include <xpool/devkit/timeline/resource.hpp>
 #include <xpool/fabric/hooks.hpp>
 #include <xpool/fabric/protocol.hpp>
 #include <xpool/macros.hpp>
 #include <xpool/utils/trace.hpp>
+
+namespace xpool::devkit::timeline::detail {
+struct LegacyRecordAccess;
+}
 
 namespace xpool::devkit::fabric_observer {
 
@@ -75,14 +82,12 @@ public:
   /// \return The executor lane index, or no value before assignment.
   std::optional<std::size_t> executor_lane_index() const {
     if (const auto *state = cuda::std::get_if<AtnAgentTraceState>(&state_)) {
-      return state->timeline.recorded(xpool::hooks::FabricAtnAgentProtocolEvent::Kind::AdmissionObserved)
-                 ? std::optional<std::size_t>{state->executor_lane_index}
-                 : std::nullopt;
+      return state->executor_lease_sequence != 0 ? std::optional<std::size_t>{state->executor_lane_index}
+                                                 : std::nullopt;
     }
     if (const auto *state = cuda::std::get_if<CoordinatorTraceState>(&state_)) {
-      return state->timeline.recorded(xpool::hooks::FabricCoordinatorProtocolEvent::Kind::Scheduled)
-                 ? std::optional<std::size_t>{state->executor_lane_index}
-                 : std::nullopt;
+      return state->executor_lease_sequence != 0 ? std::optional<std::size_t>{state->executor_lane_index}
+                                                 : std::nullopt;
     }
     if (const auto *state = cuda::std::get_if<FfnAgentTraceState>(&state_)) {
       return state->executor_lane_index;
@@ -94,14 +99,12 @@ public:
   /// \return The lease sequence, or no value before assignment.
   std::optional<std::uint64_t> executor_lease_sequence() const {
     if (const auto *state = cuda::std::get_if<AtnAgentTraceState>(&state_)) {
-      return state->timeline.recorded(xpool::hooks::FabricAtnAgentProtocolEvent::Kind::AdmissionObserved)
-                 ? std::optional<std::uint64_t>{state->executor_lease_sequence}
-                 : std::nullopt;
+      return state->executor_lease_sequence != 0 ? std::optional<std::uint64_t>{state->executor_lease_sequence}
+                                                 : std::nullopt;
     }
     if (const auto *state = cuda::std::get_if<CoordinatorTraceState>(&state_)) {
-      return state->timeline.recorded(xpool::hooks::FabricCoordinatorProtocolEvent::Kind::Scheduled)
-                 ? std::optional<std::uint64_t>{state->executor_lease_sequence}
-                 : std::nullopt;
+      return state->executor_lease_sequence != 0 ? std::optional<std::uint64_t>{state->executor_lease_sequence}
+                                                 : std::nullopt;
     }
     if (const auto *state = cuda::std::get_if<FfnAgentTraceState>(&state_)) {
       return state->executor_lease_sequence;
@@ -216,6 +219,7 @@ public:
 #endif
 
 private:
+  friend struct xpool::devkit::timeline::detail::LegacyRecordAccess;
   struct AtnAgentTraceState {
     std::size_t dp_rank_payload_rows = 0;
     xpool::ffn::ForwardMode forward_mode = xpool::ffn::ForwardMode::Idle;
@@ -295,35 +299,79 @@ struct ModelTopology {
   std::size_t atn_dp_size;
 };
 
-/// Host-owned snapshot copied from one PE-local Fabric trace buffer.
+/// Host-owned legacy snapshot rebuilt from one quiescent collection cutoff.
 struct Snapshot {
+  /// Empty result construction; fields are populated by the original getter.
+  Snapshot() = default;
+  /// Each copy owns an independent charged Record vector.
+  Snapshot(const Snapshot &) = default;
+  /// Transfer vectors and charges together.
+  Snapshot(Snapshot &&) noexcept = default;
+  /// \cond INTERNAL
+  // Preserve the original vector API while each Native result/copy keeps its
+  // own storage charged. Declared first so vectors die before their charge.
+  struct Storage {
+    std::shared_ptr<xpool::devkit::timeline::MemoryBudget> budget;
+    xpool::devkit::timeline::MemoryBudget::Reservation charge;
+    Storage() = default;
+    Storage(std::shared_ptr<xpool::devkit::timeline::MemoryBudget> owner, std::size_t bytes)
+        : budget(std::move(owner)), charge(budget->reserve(xpool::devkit::timeline::MemoryKind::Snapshot, bytes)) {}
+    Storage(const Storage &other) : budget(other.budget) {
+      if (budget)
+        charge = budget->reserve(xpool::devkit::timeline::MemoryKind::Snapshot, other.charge.bytes());
+    }
+    Storage(Storage &&) = default;
+    Storage &operator=(Storage &&other) noexcept {
+      if (this != &other) {
+        // Retire the old charge before replacing its last shared ledger owner.
+        charge = std::move(other.charge);
+        budget = std::move(other.budget);
+      }
+      return *this;
+    }
+  } storage;
+  /// \endcond
   /// NVSHMEM PE that produced this process-local snapshot.
-  int pe;
+  int pe = -1;
   /// Joined AtnAgent count.
-  std::size_t atnagent_count;
+  std::size_t atnagent_count = 0;
   /// Joined FfnAgent count.
-  std::size_t ffnagent_count;
+  std::size_t ffnagent_count = 0;
   /// Static topology for each model instance.
   std::vector<ModelTopology> model_topologies;
   /// Total number of records reserved since observer installation.
-  std::uint64_t sequence;
+  std::uint64_t sequence = 0;
   /// Number of records not retained after capacity was exhausted.
-  std::uint64_t dropped;
+  std::uint64_t dropped = 0;
   /// Retained records in reservation order.
   std::vector<Record> records;
+  /// Preserve independent copies and admit the simultaneous assignment peak.
+  Snapshot &operator=(Snapshot copy) noexcept {
+    using std::swap;
+    swap(storage, copy.storage);
+    swap(pe, copy.pe);
+    swap(atnagent_count, copy.atnagent_count);
+    swap(ffnagent_count, copy.ffnagent_count);
+    swap(model_topologies, copy.model_topologies);
+    swap(sequence, copy.sequence);
+    swap(dropped, copy.dropped);
+    swap(records, copy.records);
+    return *this;
+  }
 };
 
 /// Return the current process-local Fabric snapshot when observation is enabled.
 /// \pre The related Fabric participant is drained or otherwise synchronized.
 /// \return A Host-owned snapshot, or no value before installation or after finalization.
-/// \throws c10::Error when CUDA copy or retained observer state is invalid.
+/// \throws timeline::CollectionError when the cutoff, source or Host admission fails.
 std::optional<Snapshot> read();
 
-/// Return the process-local Fabric Observer allocation size.
+/// Return a conservative process-local Fabric recording Device requirement.
 /// \param instance_count Positive number of Fabric Instances.
 /// \param executor_lane_count Positive number of executor Lanes.
-/// \return Required bytes under current Debug Options, or zero when disabled.
-/// \throws c10::Error when geometry is invalid or size arithmetic overflows.
+/// \return Source, transfer, binding and co-located Coordinator/FfnAgent state
+/// bytes, or zero when disabled. Actual preparation admits its exact role layout.
+/// \throws c10::Error when geometry or size arithmetic is invalid.
 std::size_t allocation_bytes(std::size_t instance_count, std::size_t executor_lane_count);
 
 } // namespace xpool::devkit::fabric_observer

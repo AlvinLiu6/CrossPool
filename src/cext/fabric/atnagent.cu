@@ -158,11 +158,15 @@ XPOOL_DEVICE_FN xpool::ffn::ResultCode execute(const ArenaView &arena,
         .dp_rank_payload_rows = context.dp_rank_payload_rows,
         .forward_mode = context.forward_mode,
     };
-    xpool::hooks::FabricAtnAgentProtocolEvent::hooks(
-        {.arena = arena,
-         .instance_index = context.instance_index,
-         .kind = xpool::hooks::FabricAtnAgentProtocolEvent::Kind::SubmissionPrepared,
-         .submission = &submission.record});
+    auto prepared = xpool::hooks::FabricAtnAgentProtocolEvent::Context{
+        .arena = arena,
+        .instance_index = context.instance_index,
+        .kind = xpool::hooks::FabricAtnAgentProtocolEvent::Kind::SubmissionPrepared,
+        .submission = &submission.record};
+    xpool::hooks::FabricAtnAgentProtocolEvent::prepare(prepared);
+    // Independent association listeners belong here: the actual Submission
+    // and its observation identity both exist, before ordinary Prepared.
+    xpool::hooks::FabricAtnAgentProtocolEvent::hooks(prepared);
   }
   group.sync();
   submission.publish_record(group, arena.layout().coordinator_pe());
