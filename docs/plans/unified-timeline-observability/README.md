@@ -116,6 +116,20 @@ prefix under a healthy filesystem; it does not promise power-loss durability.
 Timed-out CUDA or IPC users retain their resources until production retirement
 proves safe release. Crashed or unpublished tails remain unknown.
 
+## Required Contract Extension
+
+[Anomalous Transport evidence](shared-contract.md#required-extension-anomalous-transport-evidence)
+must preserve received invalid request fields and actual local terminal
+boundaries through an explicit anomaly representation. Legacy projection
+omission must retain evidence of the anomaly and known terminal facts, with
+unknown and inapplicable facts distinguished. Collection remains bounded,
+and retained terminal evidence does not reconstruct missing earlier times.
+
+These are requirements for a coordinated extension, not a new interpretation
+of v4. Freeze encoding, report schema, version compatibility and reference
+fixtures jointly before runtime emission. This constraints-only change leaves
+the existing v4 encoding, fixtures and runtime interfaces unchanged.
+
 ## Implementation and Validation
 
 Downstream work starts from the same versioned fixtures: strict raw parsing and
