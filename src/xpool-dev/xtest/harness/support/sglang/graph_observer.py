@@ -13,21 +13,14 @@ import xpool.integrations.sglang.devkit.graph_observer
 @pytest.fixture
 def reset_graph_observer(
     monkeypatch: pytest.MonkeyPatch,
-    reset_global_config: None,
 ) -> Iterator[None]:
-    event_handle = xpool.integrations.sglang.devkit.graph_observer.event_handle
-    if event_handle is not None and not event_handle.closed:
-        event_handle.close()
-    monkeypatch.setattr(xpool.integrations.sglang.devkit.graph_observer, "event_file", None)
-    monkeypatch.setattr(xpool.integrations.sglang.devkit.graph_observer, "event_handle", None)
-    monkeypatch.setattr(xpool.integrations.sglang.devkit.graph_observer, "installed", False)
+    observer = xpool.integrations.sglang.devkit.graph_observer
+    monkeypatch.setattr(observer, "installed", False)
+    monkeypatch.setattr(observer, "enqueue_failures", 0)
+    monkeypatch.setattr(observer, "first_failure", "")
+    observer.templates.clear()
     yield
-    event_handle = xpool.integrations.sglang.devkit.graph_observer.event_handle
-    if event_handle is not None and not event_handle.closed:
-        event_handle.close()
-    monkeypatch.setattr(xpool.integrations.sglang.devkit.graph_observer, "event_file", None)
-    monkeypatch.setattr(xpool.integrations.sglang.devkit.graph_observer, "event_handle", None)
-    monkeypatch.setattr(xpool.integrations.sglang.devkit.graph_observer, "installed", False)
+    observer.templates.clear()
 
 
 class FullCudaGraphBackend:

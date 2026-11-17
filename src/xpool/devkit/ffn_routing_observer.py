@@ -1,114 +1,121 @@
-"""Tensor-native semantic routing snapshots for drained FfnAgents."""
+"""Routing tensor serialization on the shared Native Writer thread."""
 
 from __future__ import annotations
 
 import functools
 import json
-import logging
-from pathlib import Path
 from threading import Lock
+from typing import Literal, TypedDict
 
 import safetensors.torch
 import torch
 
 import xpool.native
-from xpool.config import get_global_config
-from xpool.fabric import FabricGenerationId, FabricParticipantPhase
+from xpool.fabric import FabricParticipantPhase
 from xpool.native import RuntimeRole
 from xpool.runtime.ffnagent.agent import FfnAgent
 
 runtime_roles = frozenset({RuntimeRole.FFNAGENT})
-logger = logging.getLogger(__name__)
 install_lock = Lock()
 installed = False
 
 
-def write_routing_snapshot(
-    generation: FabricGenerationId,
-    pe: int,
-    snapshot: xpool.native.devkit.ffn_routing_observer.Snapshot,
-) -> Path:
-    """Atomically write one drained process-local routing snapshot."""
+class RoutingRecord(TypedDict):
+    """v7 attachment facts; tensor index is only a storage location."""
 
-    outdir = get_global_config().debug.ffn_routing_observer.outdir
-    if outdir is None:
-        raise RuntimeError("xpool FFN Routing Observer requires debug.ffn_routing_observer.outdir")
-    if snapshot.dropped > snapshot.sequence or len(snapshot.records) != snapshot.sequence - snapshot.dropped:
-        raise RuntimeError("xpool FFN Routing Observer snapshot counters are inconsistent")
+    owner: int
+    sequence: int
+    status: Literal["published"]
+    generation: int
+    instance_index: int
+    invocation_sequence: int
+    lane_index: int
+    lease_sequence: int
+    layer_ordinal: int
+    publisher: int
+    pe: int
+    clock_domain_id: int
+    raw_publication_time_ns: int
+    shape: list[int]
+
+
+def encode_routing(
+    run_id: str,
+    producer_id: int,
+    attachments: list[xpool.native.devkit.ffn_routing_observer.RoutingAttachment],
+) -> bytes:
+    """Serialize Writer-owned CPU tensors using the installed Safetensors library."""
 
     tensors: dict[str, torch.Tensor] = {}
-    records: list[dict[str, int]] = []
-    for index, record in enumerate(snapshot.records):
+    records: list[RoutingRecord] = []
+    for index, record in enumerate(attachments):
+        ids, weights = record.topk_ids, record.topk_weights
         if (
-            record.topk_ids.device.type != "cpu"
-            or record.topk_ids.dtype is not torch.int32
-            or record.topk_weights.device.type != "cpu"
-            or record.topk_weights.dtype is not torch.float32
-            or record.topk_ids.ndim != 2
-            or record.topk_ids.shape != record.topk_weights.shape
-            or not record.topk_ids.is_contiguous()
-            or not record.topk_weights.is_contiguous()
-            or any(size <= 0 for size in record.topk_ids.shape)
+            ids.device.type != "cpu"
+            or weights.device.type != "cpu"
+            or ids.dtype is not torch.int32
+            or weights.dtype is not torch.float32
+            or ids.ndim != 2
+            or ids.shape != weights.shape
+            or not ids.is_contiguous()
+            or not weights.is_contiguous()
+            or any(size <= 0 for size in ids.shape)
         ):
-            raise RuntimeError("xpool FFN Routing Observer record tensors are invalid")
+            raise ValueError(
+                "Routing attachment requires contiguous CPU int32/float32 tensors with equal positive 2D shape"
+            )
         records.append(
             {
-                "instance_index": record.key.instance_index,
-                "invocation_sequence": record.key.invocation_sequence,
+                "owner": producer_id,
+                "sequence": record.sequence,
+                "status": "published",
+                "generation": record.generation,
+                "instance_index": record.instance_index,
+                "invocation_sequence": record.invocation_sequence,
+                "lane_index": record.lane_index,
+                "lease_sequence": record.lease_sequence,
                 "layer_ordinal": record.layer_ordinal,
+                "publisher": producer_id,
+                "pe": record.pe,
+                "clock_domain_id": record.clock_domain_id,
+                "raw_publication_time_ns": record.raw_publication_time_ns,
+                "shape": list(ids.shape),
             }
         )
-        tensors[f"records.{index}.topk_ids"] = record.topk_ids
-        tensors[f"records.{index}.topk_weights"] = record.topk_weights
-
-    generation_text = generation.format()
-    metadata = {
-        "generation": generation_text,
-        "pe": str(pe),
-        "sequence": str(snapshot.sequence),
-        "dropped": str(snapshot.dropped),
-        "records": json.dumps(records, separators=(",", ":")),
-    }
-    path = outdir / f"xpool.ffn-routing-observer.{generation_text}.{pe}.safetensors"
-    temporary_path = path.with_suffix(path.suffix + ".tmp")
-    temporary_path.write_bytes(safetensors.torch.save(tensors, metadata=metadata))
-    temporary_path.replace(path)
-    return path
+        tensors[f"records.{index}.topk_ids"] = ids
+        tensors[f"records.{index}.topk_weights"] = weights
+    return safetensors.torch.save(
+        tensors,
+        metadata={
+            "contract_version": "7",
+            "run_id": run_id,
+            "producer_id": str(producer_id),
+            "records": json.dumps(records, separators=(",", ":")),
+        },
+    )
 
 
 def install() -> None:
-    """Write native routing evidence at the drained lifecycle boundary."""
+    """Submit immutable tensors once at the actual DRAINED transition."""
 
-    outdir = get_global_config().debug.ffn_routing_observer.outdir
-    if outdir is None:
-        raise RuntimeError("xpool FFN Routing Observer requires debug.ffn_routing_observer.outdir")
     global installed
     with install_lock:
-        outdir.mkdir(parents=True, exist_ok=True)
         if installed:
             return
-        original_advance = FfnAgent.advance_fabric_lifecycle
+        original = FfnAgent.advance_fabric_lifecycle
 
-        @functools.wraps(original_advance)
+        @functools.wraps(original)
         def observed_advance(agent: FfnAgent) -> None:
-            plan = agent.fabric_plan
-            previous_report = agent.participant_report
-            previous_phase = previous_report.phase if previous_report is not None else None
-            original_advance(agent)
-            updated_report = agent.participant_report
+            previous = agent.participant_report
+            previous_phase = previous.phase if previous is not None else None
+            original(agent)
+            updated = agent.participant_report
             if (
-                plan is None
-                or previous_phase is FabricParticipantPhase.DRAINED
-                or updated_report is None
-                or updated_report.phase is not FabricParticipantPhase.DRAINED
+                previous_phase is not FabricParticipantPhase.DRAINED
+                and updated is not None
+                and updated.phase is FabricParticipantPhase.DRAINED
             ):
-                return
-            try:
-                snapshot = xpool.native.devkit.ffn_routing_observer.read()
-                if snapshot is not None:
-                    write_routing_snapshot(plan.generation, agent.fabric_pe(), snapshot)
-            except Exception:
-                logger.warning("failed to record xpool ffn routing observer snapshot", exc_info=True)
+                xpool.native.devkit.ffn_routing_observer.collect_drained()
 
         setattr(FfnAgent, "advance_fabric_lifecycle", observed_advance)
         installed = True

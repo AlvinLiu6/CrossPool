@@ -60,4 +60,16 @@ void bind_ecs(pybind11::module_ &module);
 /// \param module Root `xpool.native` extension module.
 void bind_transport(pybind11::module_ &module);
 
+/// Bind bounded collection values and the shared service facade.
+void bind_timeline(pybind11::module_ &module);
+
+/// Bind immutable observation preparation and budget policy.
+void bind_timeline_policy(pybind11::module_ &module);
+
+/// Bind registered Run, Producer and clock identities.
+void bind_timeline_identity(pybind11::module_ &module);
+
+/// Bind immutable semantic metadata registration.
+void bind_timeline_meta(pybind11::module_ &module);
+
 } // namespace xpool::bindings

@@ -1,30 +1,40 @@
 # Devkit
 
 Devkit observes real production execution through typed Hook Points. Transport,
-Fabric, and FFN computation remain production responsibilities.
+Fabric, and FFN computation retain production control flow and resource lifetime.
+Resolved Debug policy is immutable after native initialization.
 
-Python supplies process-wide Debug options at native initialization. Native
-owners read the immutable settings for Transport, Fabric, Graph and FFN
-Routing Observers.
+## Collection ownership
 
-Each Observer records evidence from the real execution path and owns
-process-local storage. Observer state is never stored in a Transport or Fabric
-arena. Fabric and FFN Routing Observer allocations are included in FFN memory
-admission through their native sizing queries. Transport Observer storage is a
-normal attention-side allocation. The AtnAgent post-capture device-memory
-observation therefore already reflects its bytes; it needs no duplicate
-planning field.
+Transport and Fabric Hooks publish immutable version-7 Events into one Device
+Source per observed process/Device. Graph Host calls use the registered Host
+Source. Runtime preparation distributes one Run UUID and registered Producer,
+Generation, clock and Endpoint identities before capture. Observation state stays
+outside production RequestMetadata and Transport/Fabric arenas. Successful
+Mailbox Claim allocates Operation identity independently of Event admission;
+Routing publication similarly allocates attachment identity independently of
+Event or tensor capacity.
 
-Every Observer owns its record and snapshot values and exposes reads through
-its own `xpool.native.devkit.<observer>` submodule. The Fabric Observer binding
-exposes the delivery enum and typed event timestamps for trace serialization.
-Enabled Transport, Fabric and FFN Routing Observers require positive record
-capacity when configuration is installed. An enabled Observer that cannot allocate
-or install fails startup. Exhausted Device record capacity
-increments the Observer's dropped count; an Observer destination-bounds failure
-omits that record rather than corrupting storage or changing execution.
-Snapshot read failures are reported to the Host reader and do not alter an
-already completed invocation.
+Each observed process shares one background Collector thread, one Writer thread,
+and bounded Host, Device and disk ledgers. The Collector copies only committed
+immutable slots, checks completion and reclaims slots after their copy retires.
+Bounded Host batches transfer ownership to the Writer; file I/O never blocks the
+Collector. Full capacity records explicit loss without changing production
+execution. Disabled observation installs no workers or Hook storage.
+
+Preparation admits actual layouts, alignment, Hook control, transfer buffers,
+IPC regions and complete Routing copy/serialization coexistence. The allocating
+owners retain those reservations through actual retirement. Unknown sizing,
+overflow, inconsistent registration and insufficient budgets reject preparation.
+Graph-only and Routing-only observation do not require Transport IPC identity.
+
+A file error stops export and retains reliable Event prefixes. Transfer failure
+preserves the first stop reason and bounded diagnostic while independently
+tracking uncertain CUDA completion. Uncertain slots, tokens, frames, mappings
+and memory charges remain owned until actual retirement proves release safe.
+Timeout is not retirement; uncertain tails and totals remain explicitly unknown.
+Runtime Quiesce/Detach/Drain boundaries supply producer-retirement proofs before
+Source closure and worker joining.
 
 ## Hook contract
 
@@ -46,44 +56,67 @@ complete CTA.
 
 ## Protocol and Graph evidence
 
-Protocol events correspond to real publication or observation boundaries.
-Events are not inserted merely to separate adjacent calls or to expose a
-debug-only algorithm.
+Protocol Events name actual publication or observation boundaries. Capacity and
+delivery facts come from the FfnAgent that selected them; Coordinator evidence
+does not infer those values. Transport anomalies retain original invalid request
+values and actual local terminal observations. Readers cannot infer an absent
+boundary or duration from repeated scalar facts or Source-wide loss counts.
 
-Capacity evidence is recorded by the FfnAgent that selected the installed
-Capacity and contains both live rows and selected row capacity. Delivery
-evidence is recorded from the production delivery derivation. Coordinator
-records do not infer either fact.
+Transport result codes describe their actual boundary. Successful result
+observation and output copy can precede a Closed boundary with Shutdown; retain
+each result instead of replacing it with an earlier value. Result presence is
+set only after the actual local result boundary. Endpoint metadata follows the
+contract schema; Arena handle suffixes remain internal pairing checks.
 
-Routing evidence follows the collective `RoutingMetadataPublished` event after
-the production payload and identity are published. Graph evidence records
-Primary captures and installed Lane Graphs at their owning lifecycle Points.
-Observers record evidence; runtime lifecycle and Graph topology remain owned by
-production execution.
-Native Graph snapshots expose CUDA node kinds as underlying integers; the
-Python Graph Observer resolves official cuda-python enum names only when
-constructing its JSON presentation.
+Graph construction registers fresh Host-owned templates and installed structure
+inventories. Lane templates reference their actual registered compute templates.
+SGLang capture and execution calls emit versioned Events with separate template
+and execution identities. Hook diagnostics are bounded and reported outside
+execution Hooks. Native structure attachments retain CUDA node kinds as integers,
+binding-site counts and compute/delivery branch counts.
+
+Routing captures CPU int32 IDs and float32 weights with live_rows by
+effective_topk shape after actual producer drain. A budget-owned handoff keeps
+tensors and their original Invocation, Lane/Lease, layer, PE, clock and raw time
+alive through Writer serialization. The installed Safetensors library serializes
+the payload; tensor-key positions locate data and never serve as attachment
+identities. Dense and non-Router participants declare Routing not_applicable.
 
 ## Serialized observations
 
-Python Fabric and Transport writers own concrete JSON declarations shared by
-readers and fixtures. These projections differ from native snapshots: they
-flatten role facts, serialize enums, derive durations and add process or model
-context. Matching-role native getters determine field types and nullability.
-Incomplete records remain diagnostic input: AtnAgent lane and lease facts are
-nullable until AdmissionObserved, and Coordinator lane and lease facts until
-Scheduled.
+Raw publication uses XPOOLC07, 256-byte Events and immutable metadata/quality
+revisions. Reserved bytes 136–143 are zero and presence bit 8 is forbidden.
+Artifacts and IPC descriptors accept version 7 only; no older-version fallback
+is installed. The Native ABI and calibration algorithm versions are independent.
+The Writer publishes required metadata before referencing chunks and closes
+same-directory temporary files before atomic no-replace publication. Failed
+extents remain charged to the disk quota. Legacy getters, reconstructed Records,
+JSON/JSONL exports and snapshot reports are removed. Prefill-logit observation
+has its separate qualification contract.
 
-Transport snapshot filenames combine PID, endpoint site, the Model ID's
-[URI component representation](control-plane.md#configuration-and-integration)
-and Instance Rank. Each model retains its own process-local snapshot file;
-the JSON payload carries its canonical scalar Model ID for readers.
+Independent mode selects classes with Observer flags and respects each class's
+outdir. Each directory contains `timeline.<run_uuid>/`, including
+`chunks/<producer>/<chunk_sequence>.xpool`, `metadata.<producer>.<revision>.json`
+and `quality.<producer>.<revision>.json`. Graph structures live under `graph/`;
+Routing tensors under `routing/`, with `attachments.<producer>.json` supplying
+final outcomes. Artifact metadata registers relative paths and SHA-256 hashes.
+Only published attachment outcomes have usable paths/hashes.
 
-The production SGLang Devkit package owns its lightweight Graph-event
-declaration, shared by the event writer and readers independently of Graph
-runner implementations. Native Graph snapshots retain their existing production
-model. [Tooling](tooling.md#shared-serving-lifecycle) owns file-input validation
-and the separate semantic qualification assertions.
+Sources spanning multiple class directories keep one chunk sequence space and
+count each Event once. Exact metadata and cumulative Source quality are copied
+to each registered directory; every physical copy uses the shared disk ledger.
+Equal directories coalesce publications. Configure sibling class directories
+under a common capture root for convenient offline consumption. A1 takes explicit
+file inventories; A3 requires input-relative paths and one Routing attachment
+root. It does not discover files or import closing indices automatically: their
+entries belong in the explicit input manifest. Graph paths resolve relative to
+the Graph Run directory. Conversion outputs use a separate directory and quota.
+
+Unified mode remains rejected until Dynamic Context, calibration and complete
+four-class association providers are connected. Independent evidence remains
+valid with explicit disabled, not_applicable and unavailable capabilities.
+[Tooling](tooling.md#shared-serving-lifecycle) owns test-input validation and
+semantic qualification assertions.
 
 The SGLang Prefill-logit Observer retains one FP32 next-token distribution per
 controlled qualification request on TP rank zero. Each EXTEND replaces that

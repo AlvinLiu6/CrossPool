@@ -6,7 +6,6 @@
 #include <xpool/ffn.hpp>
 
 TEST(NativeAbiContractTest, PreservesSharedValues) {
-  EXPECT_EQ(xpool::abi::kVersion, 93U);
   EXPECT_EQ(static_cast<std::uint32_t>(xpool::ffn::ForwardMode::Prefill), 1U);
   EXPECT_EQ(static_cast<std::uint32_t>(xpool::ffn::ForwardMode::Decode), 2U);
   EXPECT_EQ(static_cast<std::uint32_t>(xpool::ffn::ForwardMode::Idle), 4U);

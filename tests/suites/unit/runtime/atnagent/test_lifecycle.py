@@ -211,7 +211,9 @@ def test_transport_preparation_projects_local_instance_ranks(monkeypatch: pytest
     )
     agent.fabric_plan = fabric_plan(profile)
     prepared: list[tuple[int, dict[ModelId, int]]] = []
-    monkeypatch.setattr(agent.transport, "prepare", lambda epoch, ranks: prepared.append((epoch, ranks)) or True)
+    monkeypatch.setattr(
+        agent.transport, "prepare", lambda epoch, ranks, observation: prepared.append((epoch, ranks)) or True
+    )
     assert agent.prepare_fabric_join()
     assert prepared == [(agent.registration_epoch, {TEST_MODEL_ID: 0})]
 

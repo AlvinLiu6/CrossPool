@@ -31,9 +31,11 @@ from xpool.fabric import (
 from xpool.memory import load_memory_calibration_profile
 from xpool.model import ModelId
 from xpool.native import ABI_VERSION
+from xpool.observation import observation_enabled, observation_policy_hash
 from xpool.service.daemon import ecs
 from xpool.service.daemon.fabric import FabricController, FabricGenerationState, FabricMembership
 from xpool.service.daemon.ffn_placement import place_ffn_models
+from xpool.service.daemon.observation import ObservationAdmission
 from xpool.service.daemon.readiness import ControlPlaneProjection
 from xpool.service.daemon.registration import (
     AtnAgentRegistrationState,
@@ -146,6 +148,34 @@ class ControlPlane:
         self.cleanup_lock = threading.Lock()
         self.cleanup_deadline: float | None = None
         self.closed = False
+        self.observation: ObservationAdmission | None = None
+
+    def prepare_observation(
+        self,
+        registration: AtnAgentRegistrationState | FfnAgentRegistrationState | InstanceRankRegistrationState,
+        device: int,
+    ) -> None:
+        """Admit exact process/mapping facts before registration commit under the domain lock."""
+
+        request = registration.observation
+        if not observation_enabled():
+            if request is not None:
+                raise XpoolDaemonError("conflict", "observation preparation supplied under disabled daemon policy")
+            return
+        if request is None or request.policy_sha256 != observation_policy_hash():
+            raise XpoolDaemonError("conflict", "observation registration is missing or has a different policy")
+        visibility = self.device_uuids
+        if visibility is None or device >= len(visibility) or request.physical_device_uuid != visibility[device]:
+            raise XpoolDaemonError("conflict", "observation registration physical placement disagrees with daemon")
+        if isinstance(registration, AtnAgentRegistrationState):
+            role = "atnagent"
+        elif isinstance(registration, FfnAgentRegistrationState):
+            role = "ffnagent"
+        else:
+            role = "instance"
+        if self.observation is None:
+            self.observation = ObservationAdmission()
+        self.observation.participant(registration.proc, request, role)
 
     def start(self) -> None:
         """Resolve placement and start the retained attention-only controller.
@@ -485,6 +515,7 @@ class ControlPlane:
         with self.lock:
             if self.registrations.agent_startups.get((FabricRole.ATNAGENT, registration.device)) != registration.proc:
                 raise XpoolDaemonError("conflict", "AtnAgent startup ownership changed during registration")
+            self.prepare_observation(registration, registration.device)
             changed = self.registrations.atnagents.install_snapshot(
                 registration,
                 existing,
@@ -554,6 +585,7 @@ class ControlPlane:
             canonical_specs = self.registrations.ffn_model_specs
             if canonical_specs is not None and model_specs != canonical_specs:
                 raise XpoolDaemonError("conflict", "FfnAgent Model Specs disagree with the canonical declaration")
+            self.prepare_observation(registration, registration.device)
             changed = self.registrations.ffnagents.install_snapshot(
                 registration,
                 existing,
@@ -639,6 +671,7 @@ class ControlPlane:
                     raise XpoolDaemonError("conflict", "instance transport attributes disagree across ranks")
                 if peer.ffn_profile != registration.ffn_profile:
                     raise XpoolDaemonError("conflict", "FFN ffn_profile disagrees across instance ranks")
+            self.prepare_observation(registration, config.atn.devices[rank])
             changed = self.registrations.instances.install_snapshot(
                 registration,
                 existing,
@@ -668,7 +701,7 @@ class ControlPlane:
         registration.validate_process_ref(owner, context="deregister")
         with self.lock:
             self.registrations.instances.remove_snapshot(instance, registration)
-            lease = self.transport_broker.remove_instance(instance)
+            lease = self.transport_broker.remove_instance(instance, detached_owner=registration.proc)
             self.membership_revision += 1
             self.fabric_controller.instance_departed(
                 instance,
@@ -738,8 +771,17 @@ class ControlPlane:
             )
             if not all(owner.is_alive() for owner in membership.owners()):
                 return None
+            generation = FabricGenerationId.create()
+            observation = (
+                self.observation.generation(
+                    generation.format(), membership.observation_members, membership.agent_owners
+                )
+                if self.observation is not None
+                else None
+            )
             plan = FabricDeploymentPlan(
-                generation=FabricGenerationId.create(),
+                generation=generation,
+                observation=observation,
                 uid=FabricUid(value=xpool.native.fabric.create_uid()),
                 ffn_execution_contracts=membership.memory_context.ffn_execution,
                 ffn_memory_estimates=placement.memory_estimates,
@@ -1023,10 +1065,12 @@ class ControlPlane:
             fabric = self.fabric_controller.generation
             generation = None if fabric is None else fabric.plan.generation
             fabric_phase = None if fabric is None else fabric.phase
+            cleanup_deadline = self.cleanup_deadline
         return HeartbeatResponse(
             warnings=self.global_warnings(now),
             generation=generation,
             fabric_phase=fabric_phase,
+            cleanup_deadline=cleanup_deadline,
         )
 
     def heartbeat_atnagent(self, device: int, heartbeat: ProcessRef) -> HeartbeatResponse:
@@ -1235,14 +1279,29 @@ class ControlPlane:
                 raise XpoolDaemonError("not_ready", "atnagent registration changed during lease quiesce")
             self.transport_broker.quiesce(device, registration.proc)
             leased_instances = self.transport_broker.leased_instances(device)
+            observed = {
+                instance: lease
+                for instance in leased_instances
+                if (lease := self.transport_broker.leases[instance]).handle.observation_region is not None
+            }
             candidates = [
                 owner
                 for instance in leased_instances
+                if instance not in observed
                 if (owner := self.registrations.instances.query(instance)) is not None
             ]
         live_remaining = [owner for owner in candidates if owner.proc.is_alive()]
         return AtnAgentTransportLeaseQuiesceResponse(
             in_use=[
+                InstanceRankRef(
+                    pid=lease.owner.pid,
+                    abi_version=lease.abi_version,
+                    model_id=instance.model_id,
+                    rank=instance.rank,
+                )
+                for instance, lease in observed.items()
+            ]
+            + [
                 InstanceRankRef(
                     pid=owner.proc.pid,
                     abi_version=owner.abi_version,
@@ -1260,7 +1319,25 @@ class ControlPlane:
     ) -> list[TransportArenaPublication]:
         """Validate and normalize transport arenas published by one atnagent."""
 
-        atn_devices = get_global_config().atn.devices
+        config = get_global_config()
+        atn_devices = config.atn.devices
+        required = config.debug.timeline.enable or config.debug.transport_observer.enable
+        generation = self.fabric_controller.generation
+        preparation = None if generation is None else generation.plan.observation
+        publisher = self.registrations.atnagents.query(device)
+        if required and (preparation is None or publisher is None):
+            raise XpoolDaemonError(
+                "not_ready", "observed Transport publication requires prepared Generation membership"
+            )
+        owner_producer = 0
+        if required and preparation is not None and publisher is not None:
+            try:
+                participant = preparation.participant(publisher.proc)
+                if participant.runtime_role != "atnagent" or participant.request != publisher.observation:
+                    raise ValueError("Endpoint publisher differs from prepared registration")
+                owner_producer = participant.device_producer
+            except ValueError as error:
+                raise XpoolDaemonError("conflict", str(error)) from error
         seen: set[InstanceRankId] = set()
         seen_handles: set[str] = set()
         publications: list[TransportArenaPublication] = []
@@ -1291,6 +1368,21 @@ class ControlPlane:
                     "not_ready",
                     "atnagent transport arena handle references an instance rank that is not registered",
                 )
+            try:
+                handle.validate_observation(
+                    required=required,
+                    generation=0 if preparation is None else preparation.generation_ref,
+                    owner_producer=owner_producer,
+                )
+                if required and preparation is not None:
+                    participant = preparation.participant(registration.proc)
+                    if participant.runtime_role != "instance" or participant.request != registration.observation:
+                        raise ValueError("Endpoint Instance differs from prepared registration")
+                    region = handle.observation_region
+                    if region is None or region.allocation_bytes != xpool.native.transport.OBSERVATION_ALLOCATION_BYTES:
+                        raise ValueError("observation IPC extent differs from Native preparation")
+            except ValueError as error:
+                raise XpoolDaemonError("conflict", str(error)) from error
             publications.append(
                 TransportArenaPublication(
                     instance=instance,
@@ -1427,6 +1519,8 @@ class ControlPlane:
                     device=device,
                     handle=publication.handle,
                     publisher=atnagent_registration.proc,
+                    owner=registration.proc,
+                    abi_version=registration.abi_version,
                 ),
             )
         return publication.handle

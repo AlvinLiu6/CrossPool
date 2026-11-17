@@ -12,12 +12,11 @@ from threading import Barrier
 
 from xkit.serving.sglang.graph import SglangGraphSettings
 from xkit.serving.sglang.system import XpoolServingSystem
-from xpool.integrations.sglang.devkit import SglangGraphEvent
 from xpool.model import ModelId
 from xtest.harness.runner.requirements import ResolvedConfig
 from xtest.harness.sglang.catalog import E2eServingCase
 from xtest.harness.sglang.serving.alignment import ServingGraphArtifact, TokenOutput
-from xtest.harness.sglang.serving.graph import read_graph_events
+from xtest.harness.sglang.serving.graph import GraphObservation, read_graph_events
 from xtest.harness.sglang.serving.launch import prepare
 from xtest.harness.sglang.serving.server import SglangProbeServer, SglangServerResult
 
@@ -32,7 +31,7 @@ class ProbeRun:
     observer_outdir: Path
     graph_settings: SglangGraphSettings
     results: tuple[SglangServerResult, ...]
-    events: list[SglangGraphEvent]
+    events: list[GraphObservation]
     daemon_startup_seconds: float
     duration_seconds: float
 

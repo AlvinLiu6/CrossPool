@@ -9,14 +9,18 @@ from pathlib import Path
 import pytest
 import torch
 
-import xpool.native
 import xtest
 from xpool.native import RuntimeRole
 from xpool.native.ffn import ForwardMode, LayerKind, OutputRequirement
 from xpool.runtime.ffnagent import capture_workspace
 from xtest.harness.native.fabric import participant, topology
 from xtest.harness.native.fabric.bootstrap import fabric_bootstrap
-from xtest.harness.native.fabric.protocol import FabricCoordinatorTrace, FabricFfnAgentTrace, FabricParticipantSpec
+from xtest.harness.native.fabric.protocol import (
+    DeliveryVariant,
+    FabricCoordinatorTrace,
+    FabricFfnAgentTrace,
+    FabricParticipantSpec,
+)
 from xtest.harness.native.fabric.topology import run_fabric_topology
 from xtest.harness.support.native.fabric import assert_fabric_report
 
@@ -84,7 +88,7 @@ def test_execution_uses_installed_lane_graph(layer_kind: LayerKind, tmp_path: Pa
     first_output, second_output = repetition_bytes(instance.actual, 2, torch.bfloat16)
     assert first_output == second_output
     (ffnagent,) = (participant for participant in report.participants if participant.role is RuntimeRole.FFNAGENT)
-    snapshot = ffnagent.graph_snapshot
+    snapshot = ffnagent.graph_structure
     assert snapshot is not None
     assert snapshot.primary_graph_binding_site_counts
     assert all(count > 0 for count in snapshot.primary_graph_binding_site_counts)
@@ -140,7 +144,7 @@ def test_idle_executor_lane_remains_stable_during_repeated_execution(tmp_path: P
 
     assert_fabric_report(report, expected_repetitions=1_000)
     (ffnagent,) = (participant for participant in report.participants if participant.role is RuntimeRole.FFNAGENT)
-    snapshot = ffnagent.graph_snapshot
+    snapshot = ffnagent.graph_structure
     assert snapshot is not None
     assert snapshot.lane_compute_branch_counts == (len(snapshot.primary_graph_binding_site_counts),) * 2
     records = tuple(record for record in ffnagent.records if isinstance(record, FabricFfnAgentTrace))
@@ -168,7 +172,7 @@ def test_moe_tp2_installs_router_owner_and_nonrouter_graphs(tmp_path: Path) -> N
     assert_fabric_report(report, expected_repetitions=1)
     ffnagents = tuple(participant for participant in report.participants if participant.role is RuntimeRole.FFNAGENT)
     assert len(ffnagents) == 2
-    snapshots = tuple(participant.graph_snapshot for participant in ffnagents)
+    snapshots = tuple(participant.graph_structure for participant in ffnagents)
     assert all(snapshot is not None for snapshot in snapshots)
     assert all(snapshot.primary_graph_binding_site_counts for snapshot in snapshots if snapshot is not None)
     router_owner, nonrouter = ffnagents
@@ -197,8 +201,8 @@ def test_fp16_tp1_uses_installed_lane_graph(tmp_path: Path) -> None:
 
     assert_fabric_report(report, expected_repetitions=1)
     (ffnagent,) = (participant for participant in report.participants if participant.role is RuntimeRole.FFNAGENT)
-    assert ffnagent.graph_snapshot is not None
-    assert ffnagent.graph_snapshot.primary_graph_binding_site_counts
+    assert ffnagent.graph_structure is not None
+    assert ffnagent.graph_structure.primary_graph_binding_site_counts
 
 
 @xtest.requirements(device_count=3)
@@ -227,7 +231,7 @@ def test_fp16_tp2_delivers_complete_output(tmp_path: Path) -> None:
         for record in participant.records
         if isinstance(record, FabricFfnAgentTrace)
     }
-    assert deliveries == {xpool.native.devkit.fabric_observer.DeliveryVariant.SINGLE_COMPLETE}
+    assert deliveries == {DeliveryVariant.SINGLE_COMPLETE}
 
 
 @xtest.requirements(device_count=3)
@@ -251,8 +255,8 @@ def test_unselected_ffnagent_installs_empty_lane_root(tmp_path: Path, monkeypatc
     assert_fabric_report(report, expected_repetitions=1)
     ffnagents = tuple(participant for participant in report.participants if participant.role is RuntimeRole.FFNAGENT)
     assert len(ffnagents) == 2
-    selected = ffnagents[0].graph_snapshot
-    unselected = ffnagents[1].graph_snapshot
+    selected = ffnagents[0].graph_structure
+    unselected = ffnagents[1].graph_structure
     assert selected is not None and unselected is not None
     assert selected.primary_graph_binding_site_counts
     assert unselected.primary_graph_binding_site_counts == ()
@@ -297,7 +301,7 @@ def run_participant_with_distinct_source_policies(connection: Connection, spec: 
             2,
             ForwardMode.DECODE,
             1,
-            xpool.native.devkit.fabric_observer.DeliveryVariant.DIRECT_PARTIAL,
+            DeliveryVariant.DIRECT_PARTIAL,
             id="direct-partial-decode",
         ),
         pytest.param(
@@ -306,7 +310,7 @@ def run_participant_with_distinct_source_policies(connection: Connection, spec: 
             2,
             ForwardMode.PREFILL,
             4,
-            xpool.native.devkit.fabric_observer.DeliveryVariant.DIRECT_PARTIAL,
+            DeliveryVariant.DIRECT_PARTIAL,
             id="direct-partial-prefill",
         ),
         pytest.param(
@@ -315,7 +319,7 @@ def run_participant_with_distinct_source_policies(connection: Connection, spec: 
             4,
             ForwardMode.DECODE,
             1,
-            xpool.native.devkit.fabric_observer.DeliveryVariant.SINGLE_COMPLETE,
+            DeliveryVariant.SINGLE_COMPLETE,
             id="single-complete-decode",
         ),
         pytest.param(
@@ -324,7 +328,7 @@ def run_participant_with_distinct_source_policies(connection: Connection, spec: 
             4,
             ForwardMode.PREFILL,
             4,
-            xpool.native.devkit.fabric_observer.DeliveryVariant.SINGLE_COMPLETE,
+            DeliveryVariant.SINGLE_COMPLETE,
             id="single-complete-prefill",
         ),
         pytest.param(
@@ -333,7 +337,7 @@ def run_participant_with_distinct_source_policies(connection: Connection, spec: 
             4,
             ForwardMode.DECODE,
             1,
-            xpool.native.devkit.fabric_observer.DeliveryVariant.REPLICATED_COMPLETE,
+            DeliveryVariant.REPLICATED_COMPLETE,
             id="replicated-complete-decode",
         ),
         pytest.param(
@@ -342,7 +346,7 @@ def run_participant_with_distinct_source_policies(connection: Connection, spec: 
             4,
             ForwardMode.PREFILL,
             4,
-            xpool.native.devkit.fabric_observer.DeliveryVariant.REPLICATED_COMPLETE,
+            DeliveryVariant.REPLICATED_COMPLETE,
             id="replicated-complete-prefill",
         ),
     ],
@@ -353,7 +357,7 @@ def test_execution_reuses_1000_leases_across_delivery_shapes(
     ffnagent_count: int,
     forward_mode: ForwardMode,
     payload_rows: int,
-    expected_delivery: xpool.native.devkit.fabric_observer.DeliveryVariant,
+    expected_delivery: DeliveryVariant,
     tmp_path: Path,
 ) -> None:
     """Run 1,000 real Dense leases for every Delivery and mode cell."""
@@ -429,7 +433,7 @@ def test_execution_rebinds_two_layers_a_b_a(layer_kind: LayerKind, tmp_path: Pat
     )
     assert tuple(record.layer_ordinal for record in ffnagent_records) == (0, 1, 0)
     (ffnagent,) = (participant for participant in report.participants if participant.role is RuntimeRole.FFNAGENT)
-    assert ffnagent.graph_snapshot is not None
+    assert ffnagent.graph_structure is not None
     if layer_kind is LayerKind.MOE:
         assert ffnagent.routing is not None
         assert tuple(record.layer_ordinal for record in ffnagent.routing.records) == (0, 1, 0)

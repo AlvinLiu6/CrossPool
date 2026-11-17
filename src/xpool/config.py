@@ -50,6 +50,7 @@ __all__ = [
     "ModelConfig",
     "PrefillLogitObserverDebugConfig",
     "SchedulerConfig",
+    "TimelineDebugConfig",
     "TopologyError",
     "VendorConfig",
     "XpoolConfig",
@@ -75,6 +76,115 @@ class FfnSchedulingPolicy(StrEnum):
 
     FIFO = "fifo"
     RANDOM = "random"
+
+
+class TimelineDebugConfig(BaseModel):
+    """Immutable C0 v7 collection preparation policy.
+
+    Valid policy is distinct from installed collection capabilities. Runtime
+    preparation still rejects unified mode until its providers are connected.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enable: bool = Field(default=False, strict=True, description="Request all four unified evidence classes.")
+    outdir: Path | None = Field(default=None, description="Common unified artifact directory, resolved from cwd.")
+    device_bytes: int = Field(default=8388608, gt=0, le=2**64 - 1, strict=True, description="Bytes per process/Device.")
+    host_bytes: int = Field(default=33554432, gt=0, le=2**64 - 1, strict=True, description="Host bytes per process.")
+    chunk_bytes: int = Field(default=1048576, ge=384, le=1048576, strict=True, description="Complete chunk bytes.")
+    collection_interval_ms: int = Field(
+        default=100, gt=0, le=2**63 - 1, strict=True, description="Background scan interval in milliseconds."
+    )
+    disk_bytes: int = Field(
+        default=1073741824, gt=0, le=2**64 - 1, strict=True, description="Process disk quota across directories."
+    )
+    metadata_reserve_bytes: int = Field(
+        default=8388608, gt=0, le=2**64 - 1, strict=True, description="Protected metadata/close bytes within quota."
+    )
+    shutdown_wait_ms: int = Field(
+        default=5000, gt=0, le=5000, strict=True, description="Additional observation shutdown wait in milliseconds."
+    )
+    calibration_block_attempts: int = Field(
+        default=10, ge=10, le=10, strict=True, description="Sampling block length, fixed to ten in C0 v7."
+    )
+    device_event_slot_capacity: int = Field(
+        default=16384, gt=0, le=2**64 - 1, strict=True, description="Immutable Event slots per process/Device."
+    )
+    endpoint_capacity: int = Field(
+        default=8, gt=0, le=2**64 - 1, strict=True, description="Simultaneously open Operation IPC regions."
+    )
+    context_slot_capacity: int = Field(
+        default=64, gt=0, le=2**64 - 1, strict=True, description="Dynamic Context slots in the actual Graph owner."
+    )
+    sampler_slot_capacity: int = Field(
+        default=1, gt=0, le=2**64 - 1, strict=True, description="Raw Device-clock sample slots."
+    )
+
+    @field_validator("outdir", mode="before")
+    @classmethod
+    def reject_blank_outdir(cls, value: object) -> object:
+        """Reject blank raw configuration before Path converts it to cwd."""
+
+        if isinstance(value, str) and not value.strip():
+            raise ValueError("debug.timeline.outdir must not be blank")
+        return value
+
+    @field_validator("outdir")
+    @classmethod
+    def resolve_outdir(cls, value: Path | None) -> Path | None:
+        """Resolve the directory before immutable policy comparison."""
+
+        return None if value is None else value.expanduser().resolve()
+
+    def logical_device_minimum(self) -> int:
+        """Return only the C0 logical lower bound, excluding implementation storage.
+
+        Raises:
+            ValueError: If the declared configuration overflows its native width.
+        """
+
+        required = (
+            self.device_event_slot_capacity * 272
+            + self.endpoint_capacity * 8
+            + self.context_slot_capacity * 40
+            + self.sampler_slot_capacity * 8
+            + 256
+        )
+        if required > 2**64 - 1:
+            raise ValueError("debug.timeline logical Device minimum overflows native size")
+        return required
+
+    def native_options(self) -> xpool.native.devkit.timeline.Options:
+        """Project validated configuration without initializing observation resources."""
+
+        options = xpool.native.devkit.timeline.Options()
+        options.enable = self.enable
+        options.outdir = None if self.outdir is None else str(self.outdir)
+        options.device_bytes = self.device_bytes
+        options.host_bytes = self.host_bytes
+        options.chunk_bytes = self.chunk_bytes
+        options.collection_interval_ms = self.collection_interval_ms
+        options.disk_bytes = self.disk_bytes
+        options.metadata_reserve_bytes = self.metadata_reserve_bytes
+        options.shutdown_wait_ms = self.shutdown_wait_ms
+        options.calibration_block_attempts = self.calibration_block_attempts
+        options.device_event_slot_capacity = self.device_event_slot_capacity
+        options.endpoint_capacity = self.endpoint_capacity
+        options.context_slot_capacity = self.context_slot_capacity
+        options.sampler_slot_capacity = self.sampler_slot_capacity
+        return options
+
+    @model_validator(mode="after")
+    def validate_policy(self) -> TimelineDebugConfig:
+        """Check directory pairing, protected disk space and known minimums."""
+
+        if self.enable != (self.outdir is not None):
+            raise ValueError("debug.timeline.enable and debug.timeline.outdir must be set or unset together")
+        if self.disk_bytes - self.metadata_reserve_bytes < self.chunk_bytes:
+            raise ValueError("debug.timeline disk quota must fit its metadata reserve and one complete chunk")
+        if self.enable and self.logical_device_minimum() > self.device_bytes:
+            raise ValueError("debug.timeline.device_bytes is below the C0 logical minimum")
+        return self
 
 
 TOP_LEVEL_SOURCES = (
@@ -177,15 +287,6 @@ CONFIG_REGISTRY: tuple[ConfigSetting, ...] = (
         description="Directory used by the native transport observer for JSON output.",
     ),
     ConfigSetting(
-        name="debug_transport_observer_record_capacity",
-        path=("debug", "transport_observer", "record_capacity"),
-        parser="int",
-        allowed_sources=(ConfigSource.ENV, ConfigSource.DEFAULT),
-        default=8192,
-        env_var="XPOOL_DEBUG_TRANSPORT_OBSERVER_RECORD_CAPACITY",
-        description="Positive number of native transport trace records retained per arena.",
-    ),
-    ConfigSetting(
         name="debug_fabric_observer_enable",
         path=("debug", "fabric_observer", "enable"),
         parser="bool",
@@ -202,15 +303,6 @@ CONFIG_REGISTRY: tuple[ConfigSetting, ...] = (
         default=None,
         env_var="XPOOL_DEBUG_FABRIC_OBSERVER_OUTDIR",
         description="Directory used by the fabric observer for structured snapshots.",
-    ),
-    ConfigSetting(
-        name="debug_fabric_observer_record_capacity",
-        path=("debug", "fabric_observer", "record_capacity"),
-        parser="int",
-        allowed_sources=(ConfigSource.ENV, ConfigSource.DEFAULT),
-        default=8192,
-        env_var="XPOOL_DEBUG_FABRIC_OBSERVER_RECORD_CAPACITY",
-        description="Positive number of native fabric trace records retained per PE.",
     ),
     ConfigSetting(
         name="debug_ffn_routing_observer_enable",
@@ -238,6 +330,18 @@ CONFIG_REGISTRY: tuple[ConfigSetting, ...] = (
         default=8,
         env_var="XPOOL_DEBUG_FFN_ROUTING_OBSERVER_RECORD_CAPACITY",
         description="Positive number of routing records retained per FfnAgent.",
+    ),
+    *(
+        ConfigSetting(
+            name=f"debug_timeline_{name}",
+            path=("debug", "timeline", name),
+            parser="bool" if name == "enable" else "raw" if name == "outdir" else "int",
+            allowed_sources=(ConfigSource.ENV, ConfigSource.DEFAULT),
+            default=field.default,
+            env_var=f"XPOOL_DEBUG_TIMELINE_{name.upper()}",
+            description=field.description or "",
+        )
+        for name, field in TimelineDebugConfig.model_fields.items()
     ),
     ConfigSetting(
         name="vendor_model_base_uri",
@@ -764,13 +868,7 @@ class TransportObserverDebugConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enable: bool = Field(default=False, description="Whether native transport device-phase timing is enabled.")
-    outdir: Path | None = Field(default=None, description="Directory where transport timing snapshots are written.")
-    record_capacity: int = Field(
-        default=8192,
-        gt=0,
-        le=2**63 - 1,
-        description="Maximum transport trace records retained in each native arena.",
-    )
+    outdir: Path | None = Field(default=None, description="Directory where Transport event artifacts are written.")
 
     @model_validator(mode="after")
     def validate_transport_observer(self) -> TransportObserverDebugConfig:
@@ -799,13 +897,7 @@ class FabricObserverDebugConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enable: bool = Field(default=False, description="Whether cross-Agent Fabric timing is enabled.")
-    outdir: Path | None = Field(default=None, description="Directory where fabric snapshots are written.")
-    record_capacity: int = Field(
-        default=8192,
-        gt=0,
-        le=2**63 - 1,
-        description="Maximum fabric trace records retained by each native PE.",
-    )
+    outdir: Path | None = Field(default=None, description="Directory where Fabric event artifacts are written.")
 
     @model_validator(mode="after")
     def validate_fabric_observer(self) -> FabricObserverDebugConfig:
@@ -861,6 +953,11 @@ class DebugConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    timeline: TimelineDebugConfig = Field(
+        default_factory=TimelineDebugConfig,
+        description="Immutable bounded collection preparation policy; runtime providers remain required.",
+    )
+
     graph_observer: GraphObserverDebugConfig = Field(
         default_factory=GraphObserverDebugConfig,
         description="SGLang and native FFN CUDA Graph observer debug settings.",
@@ -883,16 +980,21 @@ class DebugConfig(BaseModel):
     )
 
     def native_options(self) -> xpool.native.debug.Options:
-        """Project the exact device-runtime debug options to native values."""
+        """Project the exact device-runtime debug options to native values.
+
+        Raises:
+            ConfigError: If unified collection providers are not prepared.
+        """
+
+        if self.timeline.enable:
+            raise ConfigError("xpool unified timeline providers are not prepared; collection cannot be enabled")
 
         return xpool.native.debug.Options(
             transport_observer=xpool.native.debug.TraceObserverOptions(
                 enable=self.transport_observer.enable,
-                record_capacity=self.transport_observer.record_capacity,
             ),
             fabric_observer=xpool.native.debug.TraceObserverOptions(
                 enable=self.fabric_observer.enable,
-                record_capacity=self.fabric_observer.record_capacity,
             ),
             graph_observer=xpool.native.debug.GraphObserverOptions(enable=self.graph_observer.enable),
             ffn_routing_observer=xpool.native.debug.FfnRoutingObserverOptions(

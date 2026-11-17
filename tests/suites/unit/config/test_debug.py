@@ -27,17 +27,16 @@ def test_daemon_host_must_be_loopback(host: str) -> None:
 
 
 @pytest.mark.parametrize(
-    ("observer_name", "env_prefix", "capacity"),
+    ("observer_name", "env_prefix"),
     [
-        ("transport_observer", "XPOOL_DEBUG_TRANSPORT_OBSERVER", 64),
-        ("fabric_observer", "XPOOL_DEBUG_FABRIC_OBSERVER", 32),
+        ("transport_observer", "XPOOL_DEBUG_TRANSPORT_OBSERVER"),
+        ("fabric_observer", "XPOOL_DEBUG_FABRIC_OBSERVER"),
     ],
 )
 def test_env_source_parses_native_observer_settings(
     tmp_path: Path,
     observer_name: str,
     env_prefix: str,
-    capacity: int,
 ) -> None:
     payload = {
         "scheduler": {"slo": {"ttft_ms": 1000, "tbt_ms": 50}},
@@ -52,14 +51,12 @@ def test_env_source_parses_native_observer_settings(
         env={
             f"{env_prefix}_ENABLE": "1",
             f"{env_prefix}_OUTDIR": str(outdir),
-            f"{env_prefix}_RECORD_CAPACITY": str(capacity),
         },
     )
 
     observer = getattr(enabled.debug, observer_name)
     assert observer.enable is True
     assert observer.outdir == outdir
-    assert observer.record_capacity == capacity
 
 
 @pytest.mark.parametrize(
@@ -90,10 +87,8 @@ def test_native_observer_requires_enable_and_outdir_together(
     [
         ("transport_observer", "enable", True, "debug_transport_observer_enable"),
         ("transport_observer", "outdir", "/tmp/transport", "debug_transport_observer_outdir"),
-        ("transport_observer", "record_capacity", 16, "debug_transport_observer_record_capacity"),
         ("fabric_observer", "enable", True, "debug_fabric_observer_enable"),
         ("fabric_observer", "outdir", "/tmp/fabric", "debug_fabric_observer_outdir"),
-        ("fabric_observer", "record_capacity", 16, "debug_fabric_observer_record_capacity"),
     ],
 )
 def test_native_observer_settings_cannot_be_set_from_toml(
@@ -112,26 +107,6 @@ def test_native_observer_settings_cannot_be_set_from_toml(
                 "models": [{"id": str(TEST_MODEL_ID), "path": "/models/m"}],
             }
         )
-
-
-@pytest.mark.parametrize("capacity", [0, -1, 2**63])
-@pytest.mark.parametrize(
-    "env_var",
-    [
-        "XPOOL_DEBUG_TRANSPORT_OBSERVER_RECORD_CAPACITY",
-        "XPOOL_DEBUG_FABRIC_OBSERVER_RECORD_CAPACITY",
-    ],
-)
-def test_observer_record_capacity_must_fit_native_range(capacity: int, env_var: str) -> None:
-    payload = {
-        "scheduler": {"slo": {"ttft_ms": 1000, "tbt_ms": 50}},
-        "atn": {"devices": [0]},
-        "ffn": {"devices": [1]},
-        "models": [{"id": str(TEST_MODEL_ID), "path": "/models/m"}],
-    }
-
-    with pytest.raises(ValidationError, match="record_capacity"):
-        XpoolConfig.from_mapping(payload, env={env_var: str(capacity)})
 
 
 def test_env_source_parses_graph_observer_settings(tmp_path: Path) -> None:

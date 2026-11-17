@@ -9,45 +9,29 @@
 
 #include <xpool/debug/options.hpp>
 #include <xpool/devkit/adapters.hpp>
+#include <xpool/devkit/timeline/attachments.hpp>
 #include <xpool/utils/cuda/graph.hpp>
 
 namespace xpool::devkit::graph_observer {
 
-namespace {
-
-std::mutex state_mutex;
-std::optional<Snapshot> snapshot;
-
-} // namespace
-
-XPOOL_HOST_HOOK_FN(xpool::hooks::FfnExecutionInstallPreEvent, HostAdapter::observe, context) {
-  if (!xpool::debug::options().graph_observer.enable) {
-    return;
-  }
-  const auto lock = std::lock_guard<std::mutex>{state_mutex};
-  snapshot.emplace();
-}
+XPOOL_HOST_HOOK_FN(xpool::hooks::FfnExecutionInstallPreEvent, HostAdapter::observe, context) {}
 
 XPOOL_HOST_HOOK_FN(xpool::hooks::FfnPrimaryGraphParameterizePostEvent, HostAdapter::observe, context) {
   if (!xpool::debug::options().graph_observer.enable) {
     return;
   }
-  const auto lock = std::lock_guard<std::mutex>{state_mutex};
-  TORCH_CHECK(snapshot.has_value(), "xpool Graph Observer received a Primary Graph before installation");
-  if (snapshot->primary_graphs.size() <= context.execution_signature_index) {
-    snapshot->primary_graphs.resize(context.execution_signature_index + 1);
-  }
-  auto &primary_graph = snapshot->primary_graphs[context.execution_signature_index];
+  auto primary_graph = timeline::make_graph_structure();
   xpool::utils::cuda::graph::for_each_reachable_node(
       context.graph, [&primary_graph](cudaGraphNode_t, cudaGraphNodeType type) { ++primary_graph.node_counts[type]; });
   primary_graph.binding_site_count = context.binding_site_count;
+  timeline::submit_graph_structure(std::move(primary_graph), false, context.execution_signature_index);
 }
 
 XPOOL_HOST_HOOK_FN(xpool::hooks::FfnLaneGraphBuildPostEvent, HostAdapter::observe, context) {
   if (!xpool::debug::options().graph_observer.enable) {
     return;
   }
-  auto lane_graph = LaneGraphSnapshot{};
+  auto lane_graph = timeline::make_graph_structure();
   xpool::utils::cuda::graph::for_each_reachable_node(
       context.graph, [&lane_graph](cudaGraphNode_t, cudaGraphNodeType type) { ++lane_graph.node_counts[type]; });
   const auto compute_branches = xpool::utils::cuda::graph::conditional_bodies(context.compute_switch);
@@ -65,25 +49,9 @@ XPOOL_HOST_HOOK_FN(xpool::hooks::FfnLaneGraphBuildPostEvent, HostAdapter::observ
         });
       })));
 
-  const auto lock = std::lock_guard<std::mutex>{state_mutex};
-  TORCH_CHECK(snapshot.has_value(), "xpool Graph Observer received a Lane Graph before installation");
-  if (snapshot->lane_graphs.size() <= context.executor_lane_index) {
-    snapshot->lane_graphs.resize(context.executor_lane_index + 1);
-  }
-  snapshot->lane_graphs[context.executor_lane_index] = std::move(lane_graph);
+  timeline::submit_graph_structure(std::move(lane_graph), true, context.executor_lane_index);
 }
 
-XPOOL_HOST_HOOK_FN(xpool::hooks::FfnExecutionFinalizePostEvent, HostAdapter::observe, context) {
-  if (!xpool::debug::options().graph_observer.enable) {
-    return;
-  }
-  const auto lock = std::lock_guard<std::mutex>{state_mutex};
-  snapshot.reset();
-}
-
-std::optional<Snapshot> read() {
-  const auto lock = std::lock_guard<std::mutex>{state_mutex};
-  return snapshot;
-}
+XPOOL_HOST_HOOK_FN(xpool::hooks::FfnExecutionFinalizePostEvent, HostAdapter::observe, context) {}
 
 } // namespace xpool::devkit::graph_observer

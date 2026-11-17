@@ -48,7 +48,7 @@ def test_config_dump_reports_config_and_sources(capsys) -> None:
         "source": "cli",
         "value": "127.0.0.6",
     }
-    assert config_record(records, "debug.transport_observer.record_capacity")["source"] == "default"
+    assert config_record(records, "debug.timeline.device_event_slot_capacity")["source"] == "default"
     assert config_record(records, "atn.devices")["source"] == "config"
     assert config_record(records, "ffn.placement.parallelism") == {
         "name": "ffn.placement.parallelism",
@@ -71,13 +71,13 @@ def test_config_dump_uses_env_config_path(monkeypatch, capsys) -> None:
 
 def test_config_dump_reports_env_source(monkeypatch, capsys) -> None:
     monkeypatch.setenv("XPOOL_CONFIG", "configs/xpool.example.toml")
-    monkeypatch.setenv("XPOOL_DEBUG_TRANSPORT_OBSERVER_RECORD_CAPACITY", "64")
+    monkeypatch.setenv("XPOOL_DEBUG_TIMELINE_DEVICE_EVENT_SLOT_CAPACITY", "64")
 
     assert main(["config", "dump"]) == 0
 
     records = json_config_records(capsys)
-    assert config_record(records, "debug.transport_observer.record_capacity") == {
-        "name": "debug.transport_observer.record_capacity",
+    assert config_record(records, "debug.timeline.device_event_slot_capacity") == {
+        "name": "debug.timeline.device_event_slot_capacity",
         "source": "env",
         "value": 64,
     }

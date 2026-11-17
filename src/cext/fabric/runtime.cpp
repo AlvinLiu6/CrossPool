@@ -310,7 +310,12 @@ void Runtime::finalize() {
   // NVSHMEM and its CUDA module remain live, unregister the module, then
   // finalize the participant-local host library.
   ffn_execution_runtime_.finalize();
+  phase_ = Phase::Drained;
   xpool::hooks::FabricFinalizePreEvent::hooks({.device = *device_});
+  // Observer collection may time out while symmetric allocations and their
+  // runtime remain intact. Keep Drained retryable until handoff. Once collective
+  // teardown starts, retain the existing fail-stop rule for partial destruction.
+  phase_ = Phase::Closed;
   ffnagent_control_.destroy();
   arena_.destroy();
   module_registration_.destroy();

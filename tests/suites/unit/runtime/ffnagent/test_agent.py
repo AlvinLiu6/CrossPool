@@ -67,6 +67,7 @@ def test_ffnagent_preserves_policy_and_registers_discovery_before_baseline(monke
         self.proc_id = ProcUniqId.current()
         self.local_rank = 0
         self.device = 1
+        self.observation_request = None
 
     def discover():
         events.append("discover")

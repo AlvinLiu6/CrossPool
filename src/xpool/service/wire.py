@@ -20,6 +20,7 @@ from xpool.fabric import (
 from xpool.memory import FfnExecutionContract, MemoryCalibrationEnvironment
 from xpool.model import ModelId
 from xpool.native.ffn import ResultCode
+from xpool.observation import ObservationDeviceRequest
 from xpool.runtime.transport import InstanceRankTransportProfile
 from xpool.service.errors import XpoolDaemonError, XpoolDaemonErrorKind
 from xpool.transport import TransportArenaHandle
@@ -196,6 +197,14 @@ class HeartbeatResponse(WireModel):
         default=None,
         description="Daemon-authoritative Fabric phase, or null before generation creation.",
     )
+    cleanup_deadline: float | None = Field(
+        default=None,
+        strict=True,
+        gt=0,
+        allow_inf_nan=False,
+        exclude_if=lambda value: value is None,
+        description="Existing daemon cleanup deadline on the shared host monotonic clock; absent before cleanup.",
+    )
 
 
 class FabricQuiesceRequest(WireModel):
@@ -209,6 +218,11 @@ class AtnAgentView(ProcessRef):
     """Operational AtnAgent fields returned by the list endpoint."""
 
     device: int = Field(ge=0, description="device index owned by the AtnAgent.")
+    observation: ObservationDeviceRequest | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description="Immutable observation preparation facts when collection is enabled.",
+    )
 
 
 class AtnAgentRegistration(AtnAgentView):
@@ -249,6 +263,11 @@ class FfnAgentView(ProcessRef):
     """Operational FfnAgent fields returned by the list endpoint."""
 
     device: int = Field(ge=0, description="device index owned by the FfnAgent.")
+    observation: ObservationDeviceRequest | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description="Immutable observation preparation facts when collection is enabled.",
+    )
     device_free_memory_bytes: int = Field(ge=1, description="Free bytes reported by the owned device.")
     device_total_memory_bytes: int = Field(ge=1, description="Total bytes reported by the owned device.")
     model_specs: tuple[ffn.FfnModelSpec, ...] = Field(
@@ -306,6 +325,12 @@ class AtnAgentTransportLeaseQuiesceResponse(WireModel):
 
 class InstanceRankRegistration(InstanceRankRef):
     """Instance-rank registration payload and list-entry view."""
+
+    observation: ObservationDeviceRequest | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description="Immutable observation preparation facts when collection is enabled.",
+    )
 
     transport: InstanceRankTransportProfile = Field(
         description="Transport attributes declared by this instance rank at registration time.",

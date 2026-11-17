@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from hashlib import sha256
 from threading import Lock
 
 import torch
@@ -45,8 +46,14 @@ def init(device: int | None, role: RuntimeRole) -> None:
         config = get_global_config()
         xpool.logging.configure(role)
         debug_options = config.debug.native_options()
+        xpool.native.devkit.timeline.configure_policy(
+            config.debug.timeline.native_options(),
+            debug_options,
+            sha256(config.debug.model_dump_json().encode("utf-8")).digest(),
+        )
         xpool.native.initialize(role, device, debug_options)
         if role is not RuntimeRole.DAEMON:
+            xpool.native.devkit.timeline.prepare_budgets()
             torch.cuda.set_device(device)
         match role:
             case RuntimeRole.DAEMON:

@@ -2,14 +2,16 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from enum import StrEnum
+from enum import IntEnum, StrEnum
 from multiprocessing.synchronize import Barrier
+from pathlib import Path
+from uuid import UUID
 
 import torch
 
-import xpool.native
 from xpool.native import RuntimeRole
 from xpool.native.ffn import ForwardMode, LayerKind, OutputRequirement, ResultCode
+from xpool.observation import ObservationParticipant
 
 FABRIC_TIMEOUT_SECONDS = 120.0
 
@@ -33,6 +35,14 @@ class FabricInstanceCommand(StrEnum):
 
     RUN = "run"
     STOP = "stop"
+
+
+class DeliveryVariant(IntEnum):
+    """Delivery branch values retained from version-7 Events."""
+
+    DIRECT_PARTIAL = 1
+    SINGLE_COMPLETE = 2
+    REPLICATED_COMPLETE = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +82,15 @@ class FabricParticipantSpec:
     layer_kind: LayerKind
     hidden_size: int
     intermediate_size: int
+    observation_outdir: Path
+
+
+@dataclass(frozen=True, slots=True)
+class FabricObservationRegistration:
+    """Launcher-distributed actual observation sources before Native join."""
+
+    run_id: UUID
+    participants: tuple[ObservationParticipant, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,7 +152,7 @@ class FabricFfnAgentTrace:
     executor_lane_index: int | None
     executor_lease_sequence: int | None
     payload_row_capacity: int | None
-    delivery: xpool.native.devkit.fabric_observer.DeliveryVariant | None
+    delivery: DeliveryVariant | None
     lane_execution_observed_ns: int
     compute_started_ns: int
     compute_completed_ns: int
@@ -144,7 +163,7 @@ type FabricTrace = FabricAtnAgentTrace | FabricCoordinatorTrace | FabricFfnAgent
 
 
 @dataclass(frozen=True, slots=True)
-class FabricGraphSnapshotEvidence:
+class FabricGraphStructureEvidence:
     """Picklable actual Primary Graph and Lane Graph snapshot evidence."""
 
     primary_graph_binding_site_counts: tuple[int, ...]
@@ -166,7 +185,7 @@ class FabricRoutingRecordEvidence:
 
 
 @dataclass(frozen=True, slots=True)
-class FabricRoutingSnapshotEvidence:
+class FabricRoutingEvidence:
     """One drained FfnAgent Routing Observer snapshot."""
 
     sequence: int
@@ -195,8 +214,8 @@ class FabricParticipantReport:
     dropped: int
     records: tuple[FabricTrace, ...]
     failure: FabricFailureEvidence | None
-    graph_snapshot: FabricGraphSnapshotEvidence | None
-    routing: FabricRoutingSnapshotEvidence | None
+    graph_structure: FabricGraphStructureEvidence | None
+    routing: FabricRoutingEvidence | None
 
 
 @dataclass(frozen=True, slots=True)

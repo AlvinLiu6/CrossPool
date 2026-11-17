@@ -1,0 +1,1369 @@
+#include <array>
+#include <string>
+#include <vector>
+
+#include <gtest/gtest.h>
+
+#include <xpool/devkit/timeline/chunk.hpp>
+#include <xpool/devkit/timeline/error.hpp>
+#include <xpool/devkit/timeline/hostchannel.hpp>
+#include <xpool/devkit/timeline/options.hpp>
+#include <xpool/devkit/timeline/routingevent.hpp>
+#include <xpool/devkit/timeline/transportevent.hpp>
+
+namespace {
+std::vector<std::byte> unhex(std::string_view text) {
+  auto bytes = std::vector<std::byte>{};
+  for (std::size_t i = 0; i < text.size(); i += 2)
+    bytes.push_back(static_cast<std::byte>(std::stoul(std::string{text.substr(i, 2)}, nullptr, 16)));
+  return bytes;
+}
+} // namespace
+
+TEST(TimelineWireTest, FrozenC0Vectors) {
+  const auto metadata_text = std::string{R"C0({
+  "contract_version": 7,
+  "run_id": "11111111-1111-4111-8111-111111111111",
+  "producer_id": 3,
+  "revision": 1,
+  "process": {
+    "creation_id": "22222222-2222-4222-8222-222222222222",
+    "pid": 101,
+    "runtime_role": "instance"
+  },
+  "clock_domain_id": 2,
+  "producers": [
+    {
+      "id": 1,
+      "source": "host",
+      "process": {
+        "creation_id": "22222222-2222-4222-8222-222222222222",
+        "pid": 101,
+        "runtime_role": "instance"
+      },
+      "process_creation_id": "22222222-2222-4222-8222-222222222222",
+      "clock_domain_id": 1
+    },
+    {
+      "id": 2,
+      "source": "device",
+      "process": {
+        "creation_id": "33333333-3333-4333-8333-333333333333",
+        "pid": 102,
+        "runtime_role": "atnagent"
+      },
+      "process_creation_id": "33333333-3333-4333-8333-333333333333",
+      "clock_domain_id": 3
+    },
+    {
+      "id": 3,
+      "source": "device",
+      "process": {
+        "creation_id": "22222222-2222-4222-8222-222222222222",
+        "pid": 101,
+        "runtime_role": "instance"
+      },
+      "process_creation_id": "22222222-2222-4222-8222-222222222222",
+      "clock_domain_id": 2
+    },
+    {
+      "id": 4,
+      "source": "host",
+      "process": {
+        "creation_id": "44444444-4444-4444-8444-444444444444",
+        "pid": 103,
+        "runtime_role": "ffnagent"
+      },
+      "process_creation_id": "44444444-4444-4444-8444-444444444444",
+      "clock_domain_id": 1
+    },
+    {
+      "id": 5,
+      "source": "device",
+      "process": {
+        "creation_id": "44444444-4444-4444-8444-444444444444",
+        "pid": 103,
+        "runtime_role": "ffnagent"
+      },
+      "process_creation_id": "44444444-4444-4444-8444-444444444444",
+      "clock_domain_id": 4
+    },
+    {
+      "id": 9,
+      "source": "host",
+      "process": {
+        "creation_id": "33333333-3333-4333-8333-333333333333",
+        "pid": 102,
+        "runtime_role": "atnagent"
+      },
+      "process_creation_id": "33333333-3333-4333-8333-333333333333",
+      "clock_domain_id": 1
+    }
+  ],
+  "generations": [
+    {
+      "id": 1,
+      "fabric_generation": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "atnagent_count": 1,
+      "ffnagent_count": 1,
+      "model_topologies": [
+        {
+          "atn_tp_size": 1,
+          "atn_dp_size": 1
+        }
+      ],
+      "scheduler": "fifo",
+      "models": [
+        {
+          "instance_index": 0,
+          "model_id": "test/test-model"
+        }
+      ],
+      "pe_members": [
+        {
+          "pe": 0,
+          "host_producer": 9,
+          "device_producer": 2
+        },
+        {
+          "pe": 1,
+          "host_producer": 4,
+          "device_producer": 5
+        }
+      ]
+    }
+  ],
+  "clock_domains": [
+    {
+      "id": 1,
+      "kind": "host_monotonic",
+      "host_creation_id": "55555555-5555-4555-8555-555555555555",
+      "unit": "ns"
+    },
+    {
+      "id": 2,
+      "kind": "device_globaltimer",
+      "process_creation_id": "22222222-2222-4222-8222-222222222222",
+      "physical_device_uuid": "GPU-fixture-attention",
+      "logical_device": 0,
+      "raw_epoch": 1,
+      "unit": "ns"
+    },
+    {
+      "id": 3,
+      "kind": "device_globaltimer",
+      "process_creation_id": "33333333-3333-4333-8333-333333333333",
+      "physical_device_uuid": "GPU-fixture-attention",
+      "logical_device": 0,
+      "raw_epoch": 1,
+      "unit": "ns"
+    },
+    {
+      "id": 4,
+      "kind": "device_globaltimer",
+      "process_creation_id": "44444444-4444-4444-8444-444444444444",
+      "physical_device_uuid": "GPU-fixture-ffn",
+      "logical_device": 0,
+      "raw_epoch": 1,
+      "unit": "ns"
+    }
+  ],
+  "endpoints": [
+    {
+      "owner_producer": 2,
+      "endpoint_sequence": 1,
+      "generation": 1,
+      "instance_index": 0,
+      "instance_rank": 0,
+      "model_id": "test/test-model",
+      "sites": [
+        {
+          "producer": 3,
+          "site": "instance"
+        },
+        {
+          "producer": 2,
+          "site": "atnagent"
+        }
+      ]
+    }
+  ],
+  "graph_templates": [
+    {
+      "owner_producer": 1,
+      "template_sequence": 1,
+      "kind": "sglang_decode",
+      "backend_class": "FixtureBackend"
+    },
+    {
+      "owner_producer": 4,
+      "template_sequence": 1,
+      "kind": "primary",
+      "signature_index": 0
+    },
+    {
+      "owner_producer": 4,
+      "template_sequence": 2,
+      "kind": "lane_service",
+      "lane_index": 0,
+      "compute_templates": [
+        1
+      ]
+    }
+  ],
+  "artifacts": [
+    {
+      "id": 1,
+      "kind": "graph_structure",
+      "status": "unavailable",
+      "path": null,
+      "sha256": null
+    }
+  ],
+  "capabilities": {
+    "transport": "enabled",
+    "fabric": "enabled",
+    "graph": "enabled",
+    "routing": "not_applicable",
+    "calibration": "enabled"
+  },
+  "configuration": {
+    "timeline": true,
+    "device_bytes": 8388608,
+    "host_bytes": 33554432,
+    "chunk_bytes": 1048576,
+    "collection_interval_ms": 100,
+    "disk_bytes": 1073741824,
+    "metadata_reserve_bytes": 8388608,
+    "shutdown_wait_ms": 5000,
+    "calibration_block_attempts": 10
+  }
+}
+)C0"};
+  const auto run = unhex("11111111111141118111111111111111");
+  auto metadata = xpool::devkit::timeline::ChunkMetadata{
+      .producer_id = 3, .revision = 1, .clock_domain_id = 2, .bytes = std::as_bytes(std::span{metadata_text})};
+  std::copy(run.begin(), run.end(), metadata.run_id.begin());
+  const auto atn_text = std::string{R"C0({
+  "contract_version": 7,
+  "run_id": "11111111-1111-4111-8111-111111111111",
+  "producer_id": 2,
+  "revision": 1,
+  "process": {
+    "creation_id": "33333333-3333-4333-8333-333333333333",
+    "pid": 102,
+    "runtime_role": "atnagent"
+  },
+  "clock_domain_id": 3,
+  "producers": [
+    {
+      "id": 1,
+      "source": "host",
+      "process": {
+        "creation_id": "22222222-2222-4222-8222-222222222222",
+        "pid": 101,
+        "runtime_role": "instance"
+      },
+      "process_creation_id": "22222222-2222-4222-8222-222222222222",
+      "clock_domain_id": 1
+    },
+    {
+      "id": 2,
+      "source": "device",
+      "process": {
+        "creation_id": "33333333-3333-4333-8333-333333333333",
+        "pid": 102,
+        "runtime_role": "atnagent"
+      },
+      "process_creation_id": "33333333-3333-4333-8333-333333333333",
+      "clock_domain_id": 3
+    },
+    {
+      "id": 3,
+      "source": "device",
+      "process": {
+        "creation_id": "22222222-2222-4222-8222-222222222222",
+        "pid": 101,
+        "runtime_role": "instance"
+      },
+      "process_creation_id": "22222222-2222-4222-8222-222222222222",
+      "clock_domain_id": 2
+    },
+    {
+      "id": 4,
+      "source": "host",
+      "process": {
+        "creation_id": "44444444-4444-4444-8444-444444444444",
+        "pid": 103,
+        "runtime_role": "ffnagent"
+      },
+      "process_creation_id": "44444444-4444-4444-8444-444444444444",
+      "clock_domain_id": 1
+    },
+    {
+      "id": 5,
+      "source": "device",
+      "process": {
+        "creation_id": "44444444-4444-4444-8444-444444444444",
+        "pid": 103,
+        "runtime_role": "ffnagent"
+      },
+      "process_creation_id": "44444444-4444-4444-8444-444444444444",
+      "clock_domain_id": 4
+    },
+    {
+      "id": 9,
+      "source": "host",
+      "process": {
+        "creation_id": "33333333-3333-4333-8333-333333333333",
+        "pid": 102,
+        "runtime_role": "atnagent"
+      },
+      "process_creation_id": "33333333-3333-4333-8333-333333333333",
+      "clock_domain_id": 1
+    }
+  ],
+  "generations": [
+    {
+      "id": 1,
+      "fabric_generation": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "atnagent_count": 1,
+      "ffnagent_count": 1,
+      "model_topologies": [
+        {
+          "atn_tp_size": 1,
+          "atn_dp_size": 1
+        }
+      ],
+      "scheduler": "fifo",
+      "models": [
+        {
+          "instance_index": 0,
+          "model_id": "test/test-model"
+        }
+      ],
+      "pe_members": [
+        {
+          "pe": 0,
+          "host_producer": 9,
+          "device_producer": 2
+        },
+        {
+          "pe": 1,
+          "host_producer": 4,
+          "device_producer": 5
+        }
+      ]
+    }
+  ],
+  "clock_domains": [
+    {
+      "id": 1,
+      "kind": "host_monotonic",
+      "host_creation_id": "55555555-5555-4555-8555-555555555555",
+      "unit": "ns"
+    },
+    {
+      "id": 2,
+      "kind": "device_globaltimer",
+      "process_creation_id": "22222222-2222-4222-8222-222222222222",
+      "physical_device_uuid": "GPU-fixture-attention",
+      "logical_device": 0,
+      "raw_epoch": 1,
+      "unit": "ns"
+    },
+    {
+      "id": 3,
+      "kind": "device_globaltimer",
+      "process_creation_id": "33333333-3333-4333-8333-333333333333",
+      "physical_device_uuid": "GPU-fixture-attention",
+      "logical_device": 0,
+      "raw_epoch": 1,
+      "unit": "ns"
+    },
+    {
+      "id": 4,
+      "kind": "device_globaltimer",
+      "process_creation_id": "44444444-4444-4444-8444-444444444444",
+      "physical_device_uuid": "GPU-fixture-ffn",
+      "logical_device": 0,
+      "raw_epoch": 1,
+      "unit": "ns"
+    }
+  ],
+  "endpoints": [
+    {
+      "owner_producer": 2,
+      "endpoint_sequence": 1,
+      "generation": 1,
+      "instance_index": 0,
+      "instance_rank": 0,
+      "model_id": "test/test-model",
+      "sites": [
+        {
+          "producer": 3,
+          "site": "instance"
+        },
+        {
+          "producer": 2,
+          "site": "atnagent"
+        }
+      ]
+    }
+  ],
+  "graph_templates": [
+    {
+      "owner_producer": 1,
+      "template_sequence": 1,
+      "kind": "sglang_decode",
+      "backend_class": "FixtureBackend"
+    },
+    {
+      "owner_producer": 4,
+      "template_sequence": 1,
+      "kind": "primary",
+      "signature_index": 0
+    },
+    {
+      "owner_producer": 4,
+      "template_sequence": 2,
+      "kind": "lane_service",
+      "lane_index": 0,
+      "compute_templates": [
+        1
+      ]
+    }
+  ],
+  "artifacts": [
+    {
+      "id": 1,
+      "kind": "graph_structure",
+      "status": "unavailable",
+      "path": null,
+      "sha256": null
+    }
+  ],
+  "capabilities": {
+    "transport": "enabled",
+    "fabric": "enabled",
+    "graph": "enabled",
+    "routing": "not_applicable",
+    "calibration": "enabled"
+  },
+  "configuration": {
+    "timeline": true,
+    "device_bytes": 8388608,
+    "host_bytes": 33554432,
+    "chunk_bytes": 1048576,
+    "collection_interval_ms": 100,
+    "disk_bytes": 1073741824,
+    "metadata_reserve_bytes": 8388608,
+    "shutdown_wait_ms": 5000,
+    "calibration_block_attempts": 10
+  }
+}
+)C0"};
+  auto atn_metadata = metadata;
+  atn_metadata.producer_id = 2;
+  atn_metadata.clock_domain_id = 3;
+  atn_metadata.bytes = std::as_bytes(std::span{atn_text});
+  {
+    SCOPED_TRACE("valid_one_event");
+    const auto bytes = unhex(
+        "58504f4f4c4330370700800000010000030000000000000001000000000000000100000000000000010000000000000001000000000000"
+        "0001000000000000005a000000000000009001000000000000000100000000000061c7674d9cda0f681111111111114111811111111111"
+        "1111f44449a8e4d3c51bbb4f1e26d145d565010000000000000064000000000000000200000000000000640000001f0601000100000000"
+        "00000002000000000000000100000000000000010000000000000001000000000000000100000000000000010000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000200000000000000000000000000000000000000000000000000000000000000020000000100000000000000000000000000"
+        "000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    const auto chunk = xpool::devkit::timeline::Chunk::decode(bytes, metadata, events);
+    auto encoded = std::vector<std::byte>(bytes.size());
+    chunk.encode(encoded);
+    EXPECT_EQ(encoded, bytes);
+    EXPECT_EQ(events[0].reserved_zero, 0);
+  }
+  {
+    SCOPED_TRACE("truncated_header");
+    const auto bytes =
+        unhex("58504f4f4c4330370700800000010000030000000000000001000000000000000100000000000000010000000000000001000000"
+              "0000000001000000000000005a00000000000000900100000000000000010000000000007c626bca1d805f8411111111");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    try {
+      (void)xpool::devkit::timeline::Chunk::decode(bytes, metadata, events);
+      FAIL() << "accepted malformed vector";
+    } catch (const xpool::devkit::timeline::ParseError &error) {
+      EXPECT_EQ(error.code(), xpool::devkit::timeline::ParseErrorCode::HeaderTruncated);
+    }
+  }
+  {
+    SCOPED_TRACE("unsupported_version");
+    const auto bytes = unhex(
+        "58504f4f4c4330370600800000010000030000000000000001000000000000000100000000000000010000000000000001000000000000"
+        "0001000000000000005a000000000000009001000000000000000100000000000061c7674d5d3401f91111111111114111811111111111"
+        "1111f44449a8e4d3c51bbb4f1e26d145d565010000000000000064000000000000000200000000000000640000001f0601000100000000"
+        "00000002000000000000000100000000000000010000000000000001000000000000000100000000000000010000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000200000000000000000000000000000000000000000000000000000000000000020000000100000000000000000000000000"
+        "000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    try {
+      (void)xpool::devkit::timeline::Chunk::decode(bytes, metadata, events);
+      FAIL() << "accepted malformed vector";
+    } catch (const xpool::devkit::timeline::ParseError &error) {
+      EXPECT_EQ(error.code(), xpool::devkit::timeline::ParseErrorCode::UnsupportedVersion);
+    }
+  }
+  {
+    SCOPED_TRACE("unknown_flags");
+    const auto bytes = unhex(
+        "58504f4f4c4330370700800000010100030000000000000001000000000000000100000000000000010000000000000001000000000000"
+        "0001000000000000005a000000000000009001000000000000000100000000000061c7674df4f108161111111111114111811111111111"
+        "1111f44449a8e4d3c51bbb4f1e26d145d565010000000000000064000000000000000200000000000000640000001f0601000100000000"
+        "00000002000000000000000100000000000000010000000000000001000000000000000100000000000000010000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000200000000000000000000000000000000000000000000000000000000000000020000000100000000000000000000000000"
+        "000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    try {
+      (void)xpool::devkit::timeline::Chunk::decode(bytes, metadata, events);
+      FAIL() << "accepted malformed vector";
+    } catch (const xpool::devkit::timeline::ParseError &error) {
+      EXPECT_EQ(error.code(), xpool::devkit::timeline::ParseErrorCode::InvalidLayout);
+    }
+  }
+  {
+    SCOPED_TRACE("wrong_event_size");
+    const auto bytes = unhex(
+        "58504f4f4c4330370700800080000000030000000000000001000000000000000100000000000000010000000000000001000000000000"
+        "0001000000000000005a000000000000009001000000000000000100000000000061c7674ddd402be71111111111114111811111111111"
+        "1111f44449a8e4d3c51bbb4f1e26d145d565010000000000000064000000000000000200000000000000640000001f0601000100000000"
+        "00000002000000000000000100000000000000010000000000000001000000000000000100000000000000010000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000200000000000000000000000000000000000000000000000000000000000000020000000100000000000000000000000000"
+        "000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    try {
+      (void)xpool::devkit::timeline::Chunk::decode(bytes, metadata, events);
+      FAIL() << "accepted malformed vector";
+    } catch (const xpool::devkit::timeline::ParseError &error) {
+      EXPECT_EQ(error.code(), xpool::devkit::timeline::ParseErrorCode::InvalidLayout);
+    }
+  }
+  {
+    SCOPED_TRACE("header_corruption");
+    const auto bytes = unhex(
+        "58504f4f4c4330370700800000010000030000000000000001000000000000000100000000000000010000000000000001000000000000"
+        "0001000000000000005b000000000000009001000000000000000100000000000061c7674d08f73ae71111111111114111811111111111"
+        "1111f44449a8e4d3c51bbb4f1e26d145d565010000000000000064000000000000000200000000000000640000001f0601000100000000"
+        "00000002000000000000000100000000000000010000000000000001000000000000000100000000000000010000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000200000000000000000000000000000000000000000000000000000000000000020000000100000000000000000000000000"
+        "000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    try {
+      (void)xpool::devkit::timeline::Chunk::decode(bytes, metadata, events);
+      FAIL() << "accepted malformed vector";
+    } catch (const xpool::devkit::timeline::ParseError &error) {
+      EXPECT_EQ(error.code(), xpool::devkit::timeline::ParseErrorCode::HeaderChecksum);
+    }
+  }
+  {
+    SCOPED_TRACE("truncated_payload");
+    const auto bytes = unhex(
+        "58504f4f4c4330370700800000010000030000000000000001000000000000000100000000000000010000000000000001000000000000"
+        "0001000000000000005a000000000000009001000000000000000100000000000061c7674d9cda0f681111111111114111811111111111"
+        "1111f44449a8e4d3c51bbb4f1e26d145d565010000000000000064000000000000000200000000000000640000001f0601000100000000"
+        "00000002000000000000000100000000000000010000000000000001000000000000000100000000000000010000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000200000000000000000000000000000000000000000000000000000000000000020000000100000000000000000000000000"
+        "0000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    try {
+      (void)xpool::devkit::timeline::Chunk::decode(bytes, metadata, events);
+      FAIL() << "accepted malformed vector";
+    } catch (const xpool::devkit::timeline::ParseError &error) {
+      EXPECT_EQ(error.code(), xpool::devkit::timeline::ParseErrorCode::InvalidLength);
+    }
+  }
+  {
+    SCOPED_TRACE("trailing_bytes");
+    const auto bytes =
+        unhex("58504f4f4c4330370700800000010000030000000000000001000000000000000100000000000000010000000000000001000000"
+              "0000000001000000000000005a000000000000009001000000000000000100000000000061c7674d9cda0f681111111111114111"
+              "8111111111111111f44449a8e4d3c51bbb4f1e26d145d56501000000000000006400000000000000020000000000000064000000"
+              "1f060100010000000000000002000000000000000100000000000000010000000000000001000000000000000100000000000000"
+              "01000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+              "00000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000"
+              "02000000010000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000"
+              "000000000000000000000000000000000000000000");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    try {
+      (void)xpool::devkit::timeline::Chunk::decode(bytes, metadata, events);
+      FAIL() << "accepted malformed vector";
+    } catch (const xpool::devkit::timeline::ParseError &error) {
+      EXPECT_EQ(error.code(), xpool::devkit::timeline::ParseErrorCode::InvalidLength);
+    }
+  }
+  {
+    SCOPED_TRACE("payload_corruption");
+    const auto bytes = unhex(
+        "58504f4f4c4330370700800000010000030000000000000001000000000000000100000000000000010000000000000001000000000000"
+        "0001000000000000005a000000000000009001000000000000000100000000000061c7674d9cda0f681111111111114111811111111111"
+        "1111f44449a8e4d3c51bbb4f1e26d145d565000000000000000064000000000000000200000000000000640000001f0601000100000000"
+        "00000002000000000000000100000000000000010000000000000001000000000000000100000000000000010000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000200000000000000000000000000000000000000000000000000000000000000020000000100000000000000000000000000"
+        "000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    try {
+      (void)xpool::devkit::timeline::Chunk::decode(bytes, metadata, events);
+      FAIL() << "accepted malformed vector";
+    } catch (const xpool::devkit::timeline::ParseError &error) {
+      EXPECT_EQ(error.code(), xpool::devkit::timeline::ParseErrorCode::PayloadChecksum);
+    }
+  }
+  {
+    SCOPED_TRACE("metadata_corruption");
+    const auto bytes = unhex(
+        "58504f4f4c4330370700800000010000030000000000000001000000000000000100000000000000010000000000000001000000000000"
+        "0001000000000000005a000000000000009001000000000000000100000000000061c7674d0d4b67c61111111111114111811111111111"
+        "1111f54449a8e4d3c51bbb4f1e26d145d565010000000000000064000000000000000200000000000000640000001f0601000100000000"
+        "00000002000000000000000100000000000000010000000000000001000000000000000100000000000000010000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000200000000000000000000000000000000000000000000000000000000000000020000000100000000000000000000000000"
+        "000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    try {
+      (void)xpool::devkit::timeline::Chunk::decode(bytes, metadata, events);
+      FAIL() << "accepted malformed vector";
+    } catch (const xpool::devkit::timeline::ParseError &error) {
+      EXPECT_EQ(error.code(), xpool::devkit::timeline::ParseErrorCode::MetadataChecksum);
+    }
+  }
+  {
+    SCOPED_TRACE("unknown_kind");
+    const auto bytes = unhex(
+        "58504f4f4c4330370700800000010000030000000000000001000000000000000100000000000000010000000000000001000000000000"
+        "0001000000000000005a0000000000000090010000000000000001000000000000fb3a1d4abf81903e1111111111114111811111111111"
+        "1111f44449a8e4d3c51bbb4f1e26d145d565010000000000000064000000000000000200000000000000e70300001f0601000100000000"
+        "00000002000000000000000100000000000000010000000000000001000000000000000100000000000000010000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000200000000000000000000000000000000000000000000000000000000000000020000000100000000000000000000000000"
+        "000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    try {
+      (void)xpool::devkit::timeline::Chunk::decode(bytes, metadata, events);
+      FAIL() << "accepted malformed vector";
+    } catch (const xpool::devkit::timeline::ParseError &error) {
+      EXPECT_EQ(error.code(), xpool::devkit::timeline::ParseErrorCode::UnknownKind);
+    }
+  }
+  {
+    SCOPED_TRACE("unknown_presence");
+    const auto bytes = unhex(
+        "58504f4f4c4330370700800000010000030000000000000001000000000000000100000000000000010000000000000001000000000000"
+        "0001000000000000005a0000000000000090010000000000000001000000000000e01acb851f083bd91111111111114111811111111111"
+        "1111f44449a8e4d3c51bbb4f1e26d145d565010000000000000064000000000000000200000000000000640000001f0601800100000000"
+        "00000002000000000000000100000000000000010000000000000001000000000000000100000000000000010000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000200000000000000000000000000000000000000000000000000000000000000020000000100000000000000000000000000"
+        "000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    try {
+      (void)xpool::devkit::timeline::Chunk::decode(bytes, metadata, events);
+      FAIL() << "accepted malformed vector";
+    } catch (const xpool::devkit::timeline::ParseError &error) {
+      EXPECT_EQ(error.code(), xpool::devkit::timeline::ParseErrorCode::InvalidEvent);
+    }
+  }
+  {
+    SCOPED_TRACE("nonzero_unused_payload");
+    const auto bytes = unhex(
+        "58504f4f4c4330370700800000010000030000000000000001000000000000000100000000000000010000000000000001000000000000"
+        "0001000000000000005a0000000000000090010000000000000001000000000000ffc7cd814036be551111111111114111811111111111"
+        "1111f44449a8e4d3c51bbb4f1e26d145d565010000000000000064000000000000000200000000000000640000001f0601000100000000"
+        "00000002000000000000000100000000000000010000000000000001000000000000000100000000000000010000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000200000000000000000000000000000000000000000000000000000000000000020000000100000000000000000000000000"
+        "000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000100000000000000");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    try {
+      (void)xpool::devkit::timeline::Chunk::decode(bytes, metadata, events);
+      FAIL() << "accepted malformed vector";
+    } catch (const xpool::devkit::timeline::ParseError &error) {
+      EXPECT_EQ(error.code(), xpool::devkit::timeline::ParseErrorCode::InvalidEvent);
+    }
+  }
+  {
+    SCOPED_TRACE("nonzero_absent_field");
+    const auto bytes = unhex(
+        "58504f4f4c4330370700800000010000030000000000000001000000000000000100000000000000010000000000000001000000000000"
+        "0001000000000000005a000000000000009001000000000000000100000000000018f3d86b9b4a75d21111111111114111811111111111"
+        "1111f44449a8e4d3c51bbb4f1e26d145d565010000000000000064000000000000000200000000000000640000001f0601000100000000"
+        "00000002000000000000000100000000000000010000000000000001000000000000000100000000000000010000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000200000000000000000000000000000000000000000000000000000000000000020000000100000000000000000000000300"
+        "000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    try {
+      (void)xpool::devkit::timeline::Chunk::decode(bytes, metadata, events);
+      FAIL() << "accepted malformed vector";
+    } catch (const xpool::devkit::timeline::ParseError &error) {
+      EXPECT_EQ(error.code(), xpool::devkit::timeline::ParseErrorCode::InvalidEvent);
+    }
+  }
+  {
+    SCOPED_TRACE("anomaly_forward_mode");
+    const auto bytes = unhex(
+        "58504f4f4c4330370700800000010000020000000000000001000000000000000100000000000000010000000000000001000000000000"
+        "0001000000000000005a0000000000000090010000000000000001000000000000616749c92dd33d4a1111111111114111811111111111"
+        "11119a4732916df8791812d5c238057dfffb01000000000000008200000000000000030000000000000096000000070005000100000000"
+        "00000002000000000000000100000000000000010000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "000002000000000000000000000067000000000000006300000001000000000000000100000000000000000000000200000000000000");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    const auto chunk = xpool::devkit::timeline::Chunk::decode(bytes, atn_metadata, events);
+    auto encoded = std::vector<std::byte>(bytes.size());
+    chunk.encode(encoded);
+    EXPECT_EQ(encoded, bytes);
+    EXPECT_EQ(events[0].reserved_zero, 0);
+  }
+  {
+    SCOPED_TRACE("anomaly_output_requirement");
+    const auto bytes = unhex(
+        "58504f4f4c4330370700800000010000020000000000000001000000000000000100000000000000010000000000000001000000000000"
+        "0001000000000000005a0000000000000090010000000000000001000000000000ad574680d72c79b51111111111114111811111111111"
+        "11119a4732916df8791812d5c238057dfffb01000000000000008200000000000000030000000000000096000000070005000100000000"
+        "00000002000000000000000100000000000000010000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "000002000000000000000000000067000000000000000200000063000000000000000200000000000000000000000200000000000000");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    const auto chunk = xpool::devkit::timeline::Chunk::decode(bytes, atn_metadata, events);
+    auto encoded = std::vector<std::byte>(bytes.size());
+    chunk.encode(encoded);
+    EXPECT_EQ(encoded, bytes);
+    EXPECT_EQ(events[0].reserved_zero, 0);
+  }
+  {
+    SCOPED_TRACE("anomaly_dp_row_layout");
+    const auto bytes = unhex(
+        "58504f4f4c4330370700800000010000020000000000000001000000000000000100000000000000010000000000000001000000000000"
+        "0001000000000000005a00000000000000900100000000000000010000000000004579dadcdd302c271111111111114111811111111111"
+        "11119a4732916df8791812d5c238057dfffb01000000000000008200000000000000030000000000000096000000070005000100000000"
+        "00000002000000000000000100000000000000010000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "000002000000000000000000000067000000000000000200000001000000630000000400000000000000000000000200000000000000");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    const auto chunk = xpool::devkit::timeline::Chunk::decode(bytes, atn_metadata, events);
+    auto encoded = std::vector<std::byte>(bytes.size());
+    chunk.encode(encoded);
+    EXPECT_EQ(encoded, bytes);
+    EXPECT_EQ(events[0].reserved_zero, 0);
+  }
+  {
+    SCOPED_TRACE("anomaly_combined");
+    const auto bytes = unhex(
+        "58504f4f4c4330370700800000010000020000000000000001000000000000000100000000000000010000000000000001000000000000"
+        "0001000000000000005a0000000000000090010000000000000001000000000000fb7e530f4291b86d1111111111114111811111111111"
+        "11119a4732916df8791812d5c238057dfffb01000000000000008200000000000000030000000000000096000000070005000100000000"
+        "00000002000000000000000100000000000000010000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000200000000000000000000006700000000000000ffffffffffffffffffffffff0700000000000000000000000200000000000000");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    const auto chunk = xpool::devkit::timeline::Chunk::decode(bytes, atn_metadata, events);
+    auto encoded = std::vector<std::byte>(bytes.size());
+    chunk.encode(encoded);
+    EXPECT_EQ(encoded, bytes);
+    EXPECT_EQ(events[0].reserved_zero, 0);
+  }
+  {
+    SCOPED_TRACE("anomaly_shutdown_zero_time");
+    const auto bytes = unhex(
+        "58504f4f4c4330370700800000010000020000000000000001000000000000000100000000000000010000000000000002000000000000"
+        "0002000000000000005a0000000000000090010000000000000001000000000000a2ffa694aad6a2aa1111111111114111811111111111"
+        "11119a4732916df8791812d5c238057dfffb02000000000000000000000000000000030000000000000096000000078005000100000000"
+        "00000002000000000000000100000000000000010000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000100"
+        "00000200000000000000000000006a000000000000006300000001000000000000000100000000000000000000000200000000000000");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    const auto chunk = xpool::devkit::timeline::Chunk::decode(bytes, atn_metadata, events);
+    auto encoded = std::vector<std::byte>(bytes.size());
+    chunk.encode(encoded);
+    EXPECT_EQ(encoded, bytes);
+    EXPECT_EQ(events[0].reserved_zero, 0);
+  }
+  {
+    SCOPED_TRACE("anomaly_boundary_100");
+    const auto bytes = unhex(
+        "58504f4f4c4330370700800000010000030000000000000001000000000000000100000000000000010000000000000001000000000000"
+        "0001000000000000005a000000000000009001000000000000000100000000000053a3c54f4f8d68641111111111114111811111111111"
+        "1111f44449a8e4d3c51bbb4f1e26d145d56501000000000000000000000000000000020000000000000096000000070005000100000000"
+        "00000002000000000000000100000000000000010000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "000001000000000000000000000064000000000000006300000001000000000000000100000000000000000000000200000000000000");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    const auto chunk = xpool::devkit::timeline::Chunk::decode(bytes, metadata, events);
+    auto encoded = std::vector<std::byte>(bytes.size());
+    chunk.encode(encoded);
+    EXPECT_EQ(encoded, bytes);
+    EXPECT_EQ(events[0].reserved_zero, 0);
+  }
+  {
+    SCOPED_TRACE("anomaly_boundary_101");
+    const auto bytes = unhex(
+        "58504f4f4c4330370700800000010000030000000000000001000000000000000100000000000000010000000000000001000000000000"
+        "0001000000000000005a0000000000000090010000000000000001000000000000143181e05a154f781111111111114111811111111111"
+        "1111f44449a8e4d3c51bbb4f1e26d145d56501000000000000000000000000000000020000000000000096000000070005000100000000"
+        "00000002000000000000000100000000000000010000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "000001000000000000000000000065000000000000006300000001000000000000000100000000000000000000000200000000000000");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    const auto chunk = xpool::devkit::timeline::Chunk::decode(bytes, metadata, events);
+    auto encoded = std::vector<std::byte>(bytes.size());
+    chunk.encode(encoded);
+    EXPECT_EQ(encoded, bytes);
+    EXPECT_EQ(events[0].reserved_zero, 0);
+  }
+  {
+    SCOPED_TRACE("anomaly_boundary_102");
+    const auto bytes = unhex(
+        "58504f4f4c4330370700800000010000030000000000000001000000000000000100000000000000010000000000000001000000000000"
+        "0001000000000000005a00000000000000900100000000000000010000000000009c813dca65bd275c1111111111114111811111111111"
+        "1111f44449a8e4d3c51bbb4f1e26d145d56501000000000000000000000000000000020000000000000096000000070005000100000000"
+        "00000002000000000000000100000000000000010000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "000001000000000000000000000066000000000000006300000001000000000000000100000000000000000000000200000000000000");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    const auto chunk = xpool::devkit::timeline::Chunk::decode(bytes, metadata, events);
+    auto encoded = std::vector<std::byte>(bytes.size());
+    chunk.encode(encoded);
+    EXPECT_EQ(encoded, bytes);
+    EXPECT_EQ(events[0].reserved_zero, 0);
+  }
+  {
+    SCOPED_TRACE("anomaly_boundary_103");
+    const auto bytes = unhex(
+        "58504f4f4c4330370700800000010000020000000000000001000000000000000100000000000000010000000000000001000000000000"
+        "0001000000000000005a0000000000000090010000000000000001000000000000c1e75bdf008696571111111111114111811111111111"
+        "11119a4732916df8791812d5c238057dfffb01000000000000000000000000000000030000000000000096000000070005000100000000"
+        "00000002000000000000000100000000000000010000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "000002000000000000000000000067000000000000006300000001000000000000000100000000000000000000000200000000000000");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    const auto chunk = xpool::devkit::timeline::Chunk::decode(bytes, atn_metadata, events);
+    auto encoded = std::vector<std::byte>(bytes.size());
+    chunk.encode(encoded);
+    EXPECT_EQ(encoded, bytes);
+    EXPECT_EQ(events[0].reserved_zero, 0);
+  }
+  {
+    SCOPED_TRACE("anomaly_boundary_104");
+    const auto bytes = unhex(
+        "58504f4f4c4330370700800000010000020000000000000001000000000000000100000000000000010000000000000001000000000000"
+        "0001000000000000005a00000000000000900100000000000000010000000000006995155fc38e5ce21111111111114111811111111111"
+        "11119a4732916df8791812d5c238057dfffb01000000000000000000000000000000030000000000000096000000070005000100000000"
+        "00000002000000000000000100000000000000010000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "000002000000000000000000000068000000000000006300000001000000000000000100000000000000000000000200000000000000");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    const auto chunk = xpool::devkit::timeline::Chunk::decode(bytes, atn_metadata, events);
+    auto encoded = std::vector<std::byte>(bytes.size());
+    chunk.encode(encoded);
+    EXPECT_EQ(encoded, bytes);
+    EXPECT_EQ(events[0].reserved_zero, 0);
+  }
+  {
+    SCOPED_TRACE("anomaly_boundary_105");
+    const auto bytes = unhex(
+        "58504f4f4c4330370700800000010000020000000000000001000000000000000100000000000000010000000000000001000000000000"
+        "0001000000000000005a00000000000000900100000000000000010000000000002e0751f0d6167bfe1111111111114111811111111111"
+        "11119a4732916df8791812d5c238057dfffb01000000000000000000000000000000030000000000000096000000070005000100000000"
+        "00000002000000000000000100000000000000010000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "000002000000000000000000000069000000000000006300000001000000000000000100000000000000000000000200000000000000");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    const auto chunk = xpool::devkit::timeline::Chunk::decode(bytes, atn_metadata, events);
+    auto encoded = std::vector<std::byte>(bytes.size());
+    chunk.encode(encoded);
+    EXPECT_EQ(encoded, bytes);
+    EXPECT_EQ(events[0].reserved_zero, 0);
+  }
+  {
+    SCOPED_TRACE("anomaly_boundary_106");
+    const auto bytes = unhex(
+        "58504f4f4c4330370700800000010000020000000000000001000000000000000100000000000000010000000000000001000000000000"
+        "0001000000000000005a0000000000000090010000000000000001000000000000c75f3d3b686a1cc71111111111114111811111111111"
+        "11119a4732916df8791812d5c238057dfffb01000000000000000000000000000000030000000000000096000000078005000100000000"
+        "00000002000000000000000100000000000000010000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000200"
+        "00000200000000000000000000006a000000000000006300000001000000000000000100000000000000000000000200000000000000");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    const auto chunk = xpool::devkit::timeline::Chunk::decode(bytes, atn_metadata, events);
+    auto encoded = std::vector<std::byte>(bytes.size());
+    chunk.encode(encoded);
+    EXPECT_EQ(encoded, bytes);
+    EXPECT_EQ(events[0].reserved_zero, 0);
+  }
+  {
+    SCOPED_TRACE("anomaly_boundary_107");
+    const auto bytes = unhex(
+        "58504f4f4c4330370700800000010000030000000000000001000000000000000100000000000000010000000000000001000000000000"
+        "0001000000000000005a00000000000000900100000000000000010000000000009a395b2e0d51adcc1111111111114111811111111111"
+        "1111f44449a8e4d3c51bbb4f1e26d145d56501000000000000000000000000000000020000000000000096000000078005000100000000"
+        "00000002000000000000000100000000000000010000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000200"
+        "00000100000000000000000000006b000000000000006300000001000000000000000100000000000000000000000200000000000000");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    const auto chunk = xpool::devkit::timeline::Chunk::decode(bytes, metadata, events);
+    auto encoded = std::vector<std::byte>(bytes.size());
+    chunk.encode(encoded);
+    EXPECT_EQ(encoded, bytes);
+    EXPECT_EQ(events[0].reserved_zero, 0);
+  }
+  {
+    SCOPED_TRACE("anomaly_boundary_108");
+    const auto bytes = unhex(
+        "58504f4f4c4330370700800000010000030000000000000001000000000000000100000000000000010000000000000001000000000000"
+        "0001000000000000005a0000000000000090010000000000000001000000000000cdca66d466995b981111111111114111811111111111"
+        "1111f44449a8e4d3c51bbb4f1e26d145d56501000000000000000000000000000000020000000000000096000000078005000100000000"
+        "00000002000000000000000100000000000000010000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000200"
+        "00000100000000000000000000006c000000000000006300000001000000000000000100000000000000000000000200000000000000");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    const auto chunk = xpool::devkit::timeline::Chunk::decode(bytes, metadata, events);
+    auto encoded = std::vector<std::byte>(bytes.size());
+    chunk.encode(encoded);
+    EXPECT_EQ(encoded, bytes);
+    EXPECT_EQ(events[0].reserved_zero, 0);
+  }
+  {
+    SCOPED_TRACE("anomaly_boundary_109");
+    const auto bytes = unhex(
+        "58504f4f4c4330370700800000010000030000000000000001000000000000000100000000000000010000000000000001000000000000"
+        "0001000000000000005a0000000000000090010000000000000001000000000000247f0840b61c00e11111111111114111811111111111"
+        "1111f44449a8e4d3c51bbb4f1e26d145d56501000000000000000000000000000000020000000000000096000000078005000100000000"
+        "00000002000000000000000100000000000000010000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000100000000000000000000006d000000000000006300000001000000000000000100000000000000000000000200000000000000");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    const auto chunk = xpool::devkit::timeline::Chunk::decode(bytes, metadata, events);
+    auto encoded = std::vector<std::byte>(bytes.size());
+    chunk.encode(encoded);
+    EXPECT_EQ(encoded, bytes);
+    EXPECT_EQ(events[0].reserved_zero, 0);
+  }
+  {
+    SCOPED_TRACE("anomaly_boundary_110");
+    const auto bytes = unhex(
+        "58504f4f4c4330370700800000010000030000000000000001000000000000000100000000000000010000000000000001000000000000"
+        "0001000000000000005a000000000000009001000000000000000100000000000002e89e514ca914a01111111111114111811111111111"
+        "1111f44449a8e4d3c51bbb4f1e26d145d56501000000000000000000000000000000020000000000000096000000078005000100000000"
+        "00000002000000000000000100000000000000010000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000200"
+        "00000100000000000000000000006e000000000000006300000001000000000000000100000000000000000000000200000000000000");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    const auto chunk = xpool::devkit::timeline::Chunk::decode(bytes, metadata, events);
+    auto encoded = std::vector<std::byte>(bytes.size());
+    chunk.encode(encoded);
+    EXPECT_EQ(encoded, bytes);
+    EXPECT_EQ(events[0].reserved_zero, 0);
+  }
+  {
+    SCOPED_TRACE("invalid_anomaly_mask_zero");
+    const auto bytes = unhex(
+        "58504f4f4c4330370700800000010000020000000000000001000000000000000100000000000000010000000000000001000000000000"
+        "0001000000000000005a0000000000000090010000000000000001000000000000275c2eaca25dee801111111111114111811111111111"
+        "11119a4732916df8791812d5c238057dfffb01000000000000008200000000000000030000000000000096000000070005000100000000"
+        "00000002000000000000000100000000000000010000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "000002000000000000000000000067000000000000006300000001000000000000000000000000000000000000000200000000000000");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    try {
+      (void)xpool::devkit::timeline::Chunk::decode(bytes, atn_metadata, events);
+      FAIL() << "accepted malformed vector";
+    } catch (const xpool::devkit::timeline::ParseError &error) {
+      EXPECT_EQ(error.code(), xpool::devkit::timeline::ParseErrorCode::InvalidEvent);
+    }
+  }
+  {
+    SCOPED_TRACE("invalid_anomaly_mask_mismatch");
+    const auto bytes = unhex(
+        "58504f4f4c4330370700800000010000020000000000000001000000000000000100000000000000010000000000000001000000000000"
+        "0001000000000000005a0000000000000090010000000000000001000000000000ab2ae066fd4638ce1111111111114111811111111111"
+        "11119a4732916df8791812d5c238057dfffb01000000000000008200000000000000030000000000000096000000070005000100000000"
+        "00000002000000000000000100000000000000010000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "000002000000000000000000000067000000000000006300000001000000000000000200000000000000000000000200000000000000");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    try {
+      (void)xpool::devkit::timeline::Chunk::decode(bytes, atn_metadata, events);
+      FAIL() << "accepted malformed vector";
+    } catch (const xpool::devkit::timeline::ParseError &error) {
+      EXPECT_EQ(error.code(), xpool::devkit::timeline::ParseErrorCode::InvalidEvent);
+    }
+  }
+  {
+    SCOPED_TRACE("invalid_anomaly_mask_high_bits");
+    const auto bytes = unhex(
+        "58504f4f4c4330370700800000010000020000000000000001000000000000000100000000000000010000000000000001000000000000"
+        "0001000000000000005a0000000000000090010000000000000001000000000000d3b1925410b814aa1111111111114111811111111111"
+        "11119a4732916df8791812d5c238057dfffb01000000000000008200000000000000030000000000000096000000070005000100000000"
+        "00000002000000000000000100000000000000010000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "000002000000000000000000000067000000000000006300000001000000000000000900000000000000000000000200000000000000");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    try {
+      (void)xpool::devkit::timeline::Chunk::decode(bytes, atn_metadata, events);
+      FAIL() << "accepted malformed vector";
+    } catch (const xpool::devkit::timeline::ParseError &error) {
+      EXPECT_EQ(error.code(), xpool::devkit::timeline::ParseErrorCode::InvalidEvent);
+    }
+  }
+  {
+    SCOPED_TRACE("invalid_anomaly_ordinary_presence");
+    const auto bytes = unhex(
+        "58504f4f4c4330370700800000010000020000000000000001000000000000000100000000000000010000000000000001000000000000"
+        "0001000000000000005a0000000000000090010000000000000001000000000000a9df44bdeeb2c66e1111111111114111811111111111"
+        "11119a4732916df8791812d5c238057dfffb01000000000000008200000000000000030000000000000096000000070605000100000000"
+        "00000002000000000000000100000000000000010000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "000002000000000000000000000067000000000000006300000001000000000000000100000000000000000000000200000000000000");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    try {
+      (void)xpool::devkit::timeline::Chunk::decode(bytes, atn_metadata, events);
+      FAIL() << "accepted malformed vector";
+    } catch (const xpool::devkit::timeline::ParseError &error) {
+      EXPECT_EQ(error.code(), xpool::devkit::timeline::ParseErrorCode::InvalidEvent);
+    }
+  }
+  {
+    SCOPED_TRACE("invalid_anomaly_missing_raw_presence");
+    const auto bytes = unhex(
+        "58504f4f4c4330370700800000010000020000000000000001000000000000000100000000000000010000000000000001000000000000"
+        "0001000000000000005a00000000000000900100000000000000010000000000005c062aa88f95413f1111111111114111811111111111"
+        "11119a4732916df8791812d5c238057dfffb01000000000000008200000000000000030000000000000096000000070001000100000000"
+        "00000002000000000000000100000000000000010000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "000002000000000000000000000067000000000000006300000001000000000000000100000000000000000000000200000000000000");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    try {
+      (void)xpool::devkit::timeline::Chunk::decode(bytes, atn_metadata, events);
+      FAIL() << "accepted malformed vector";
+    } catch (const xpool::devkit::timeline::ParseError &error) {
+      EXPECT_EQ(error.code(), xpool::devkit::timeline::ParseErrorCode::InvalidEvent);
+    }
+  }
+  {
+    SCOPED_TRACE("invalid_anomaly_result_before_publication");
+    const auto bytes = unhex(
+        "58504f4f4c4330370700800000010000020000000000000001000000000000000100000000000000010000000000000001000000000000"
+        "0001000000000000005a0000000000000090010000000000000001000000000000008f9928ac0732571111111111114111811111111111"
+        "11119a4732916df8791812d5c238057dfffb01000000000000008200000000000000030000000000000096000000078005000100000000"
+        "00000002000000000000000100000000000000010000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000200"
+        "000002000000000000000000000067000000000000006300000001000000000000000100000000000000000000000200000000000000");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    try {
+      (void)xpool::devkit::timeline::Chunk::decode(bytes, atn_metadata, events);
+      FAIL() << "accepted malformed vector";
+    } catch (const xpool::devkit::timeline::ParseError &error) {
+      EXPECT_EQ(error.code(), xpool::devkit::timeline::ParseErrorCode::InvalidEvent);
+    }
+  }
+  {
+    SCOPED_TRACE("invalid_anomaly_wrong_site");
+    const auto bytes = unhex(
+        "58504f4f4c4330370700800000010000020000000000000001000000000000000100000000000000010000000000000001000000000000"
+        "0001000000000000005a0000000000000090010000000000000001000000000000e9d7f5e3127b556e1111111111114111811111111111"
+        "11119a4732916df8791812d5c238057dfffb01000000000000008200000000000000030000000000000096000000070005000100000000"
+        "00000002000000000000000100000000000000010000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "000002000000000000000000000064000000000000006300000001000000000000000100000000000000000000000200000000000000");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    try {
+      (void)xpool::devkit::timeline::Chunk::decode(bytes, atn_metadata, events);
+      FAIL() << "accepted malformed vector";
+    } catch (const xpool::devkit::timeline::ParseError &error) {
+      EXPECT_EQ(error.code(), xpool::devkit::timeline::ParseErrorCode::InvalidEvent);
+    }
+  }
+  {
+    SCOPED_TRACE("invalid_anomaly_unknown_boundary");
+    const auto bytes = unhex(
+        "58504f4f4c4330370700800000010000020000000000000001000000000000000100000000000000010000000000000001000000000000"
+        "0001000000000000005a00000000000000900100000000000000010000000000009ee63ab3851301ab1111111111114111811111111111"
+        "11119a4732916df8791812d5c238057dfffb01000000000000008200000000000000030000000000000096000000070005000100000000"
+        "00000002000000000000000100000000000000010000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000200000000000000000000006f000000000000006300000001000000000000000100000000000000000000000200000000000000");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    try {
+      (void)xpool::devkit::timeline::Chunk::decode(bytes, atn_metadata, events);
+      FAIL() << "accepted malformed vector";
+    } catch (const xpool::devkit::timeline::ParseError &error) {
+      EXPECT_EQ(error.code(), xpool::devkit::timeline::ParseErrorCode::InvalidEvent);
+    }
+  }
+  {
+    SCOPED_TRACE("invalid_anomaly_legal_raw_enums");
+    const auto bytes = unhex(
+        "58504f4f4c4330370700800000010000020000000000000001000000000000000100000000000000010000000000000001000000000000"
+        "0001000000000000005a0000000000000090010000000000000001000000000000bd044477deccffc91111111111114111811111111111"
+        "11119a4732916df8791812d5c238057dfffb01000000000000008200000000000000030000000000000096000000070005000100000000"
+        "00000002000000000000000100000000000000010000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "000002000000000000000000000067000000000000000200000001000000000000000100000000000000000000000200000000000000");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    try {
+      (void)xpool::devkit::timeline::Chunk::decode(bytes, atn_metadata, events);
+      FAIL() << "accepted malformed vector";
+    } catch (const xpool::devkit::timeline::ParseError &error) {
+      EXPECT_EQ(error.code(), xpool::devkit::timeline::ParseErrorCode::InvalidEvent);
+    }
+  }
+  {
+    SCOPED_TRACE("invalid_anomaly_missing_result");
+    const auto bytes = unhex(
+        "58504f4f4c4330370700800000010000020000000000000001000000000000000100000000000000010000000000000002000000000000"
+        "0002000000000000005a0000000000000090010000000000000001000000000000d7fb5b8d236e19db1111111111114111811111111111"
+        "11119a4732916df8791812d5c238057dfffb0200000000000000b400000000000000030000000000000096000000070005000100000000"
+        "00000002000000000000000100000000000000010000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000200000000000000000000006a000000000000006300000001000000000000000100000000000000000000000200000000000000");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    try {
+      (void)xpool::devkit::timeline::Chunk::decode(bytes, atn_metadata, events);
+      FAIL() << "accepted malformed vector";
+    } catch (const xpool::devkit::timeline::ParseError &error) {
+      EXPECT_EQ(error.code(), xpool::devkit::timeline::ParseErrorCode::InvalidEvent);
+    }
+  }
+  {
+    SCOPED_TRACE("invalid_anomaly_result_enum");
+    const auto bytes = unhex(
+        "58504f4f4c4330370700800000010000020000000000000001000000000000000100000000000000010000000000000002000000000000"
+        "0002000000000000005a0000000000000090010000000000000001000000000000447bf521ed9c92691111111111114111811111111111"
+        "11119a4732916df8791812d5c238057dfffb0200000000000000b400000000000000030000000000000096000000078005000100000000"
+        "00000002000000000000000100000000000000010000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000400"
+        "00000200000000000000000000006a000000000000006300000001000000000000000100000000000000000000000200000000000000");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    try {
+      (void)xpool::devkit::timeline::Chunk::decode(bytes, atn_metadata, events);
+      FAIL() << "accepted malformed vector";
+    } catch (const xpool::devkit::timeline::ParseError &error) {
+      EXPECT_EQ(error.code(), xpool::devkit::timeline::ParseErrorCode::InvalidEvent);
+    }
+  }
+  {
+    SCOPED_TRACE("invalid_raw_request_on_ordinary_kind");
+    const auto bytes = unhex(
+        "58504f4f4c4330370700800000010000020000000000000001000000000000000100000000000000010000000000000001000000000000"
+        "0001000000000000005a00000000000000900100000000000000010000000000008263b182600ff16d1111111111114111811111111111"
+        "11119a4732916df8791812d5c238057dfffb01000000000000008200000000000000030000000000000067000000070005000100000000"
+        "00000002000000000000000100000000000000010000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "000002000000000000000000000067000000000000006300000001000000000000000100000000000000000000000200000000000000");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    try {
+      (void)xpool::devkit::timeline::Chunk::decode(bytes, atn_metadata, events);
+      FAIL() << "accepted malformed vector";
+    } catch (const xpool::devkit::timeline::ParseError &error) {
+      EXPECT_EQ(error.code(), xpool::devkit::timeline::ParseErrorCode::InvalidEvent);
+    }
+  }
+  {
+    SCOPED_TRACE("nonzero_reserved_bytes");
+    const auto bytes = unhex(
+        "58504f4f4c4330370700800000010000030000000000000001000000000000000100000000000000010000000000000001000000000000"
+        "0001000000000000005a0000000000000090010000000000000001000000000000a02969dc7ce15b8b1111111111114111811111111111"
+        "1111f44449a8e4d3c51bbb4f1e26d145d565010000000000000064000000000000000200000000000000640000001f0601000100000000"
+        "00000002000000000000000100000000000000010000000000000001000000000000000100000000000000010000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000100000000000000000000"
+        "00000000000200000000000000000000000000000000000000000000000000000000000000020000000100000000000000000000000000"
+        "000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    try {
+      (void)xpool::devkit::timeline::Chunk::decode(bytes, metadata, events);
+      FAIL() << "accepted malformed vector";
+    } catch (const xpool::devkit::timeline::ParseError &error) {
+      EXPECT_EQ(error.code(), xpool::devkit::timeline::ParseErrorCode::InvalidEvent);
+    }
+  }
+  {
+    SCOPED_TRACE("reserved_presence_bit");
+    const auto bytes = unhex(
+        "58504f4f4c4330370700800000010000030000000000000001000000000000000100000000000000010000000000000001000000000000"
+        "0001000000000000005a0000000000000090010000000000000001000000000000bd8c655b1c369c8b1111111111114111811111111111"
+        "1111f44449a8e4d3c51bbb4f1e26d145d565010000000000000064000000000000000200000000000000640000001f0701000100000000"
+        "00000002000000000000000100000000000000010000000000000001000000000000000100000000000000010000000000000000000000"
+        "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000200000000000000000000000000000000000000000000000000000000000000020000000100000000000000000000000000"
+        "000001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000");
+    auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+    try {
+      (void)xpool::devkit::timeline::Chunk::decode(bytes, metadata, events);
+      FAIL() << "accepted malformed vector";
+    } catch (const xpool::devkit::timeline::ParseError &error) {
+      EXPECT_EQ(error.code(), xpool::devkit::timeline::ParseErrorCode::InvalidEvent);
+    }
+  }
+}
+
+TEST(TimelineQualityTest, LaterTransferFailurePreservesFirstReasonAndUnknownTail) {
+  auto host = xpool::devkit::timeline::MemoryBudget::create(1 << 20);
+  const auto source = xpool::devkit::timeline::BatchSource{.producer = 1, .clock_domain_id = 1};
+  const auto channel = xpool::devkit::timeline::HostChannel::create(host, source, {.metadata_revision = 1}, 2, 2, 2);
+  auto &collector = channel->collector();
+  collector.fail(xpool::devkit::timeline::StopReason::ShutdownDeadline);
+  collector.fail_transfer();
+  channel->buffer().stop();
+  collector.seal_source(channel->buffer().quiescent_counts());
+  collector.finish_export();
+  const auto report = xpool::devkit::timeline::quality(collector);
+  EXPECT_EQ(report.stop_reason, xpool::devkit::timeline::StopReason::ShutdownDeadline);
+  EXPECT_EQ(report.export_state, xpool::devkit::timeline::ExportState::Failed);
+  EXPECT_EQ(report.tail, xpool::devkit::timeline::Tail::Unknown);
+  EXPECT_FALSE(report.pending.has_value());
+  EXPECT_FALSE(report.exact_totals);
+}
+
+TEST(TimelineQualityTest, FileFailureDoesNotInvalidateProvenCompletion) {
+  auto host = xpool::devkit::timeline::MemoryBudget::create(1 << 20);
+  const auto channel = xpool::devkit::timeline::HostChannel::create(host, {.producer = 1, .clock_domain_id = 1},
+                                                                    {.metadata_revision = 1}, 2, 2, 2);
+  auto &collector = channel->collector();
+  collector.fail(xpool::devkit::timeline::StopReason::IoError);
+  channel->buffer().stop();
+  collector.seal_source(channel->buffer().quiescent_counts());
+  collector.finish_export();
+  const auto report = xpool::devkit::timeline::quality(collector);
+  EXPECT_EQ(report.export_state, xpool::devkit::timeline::ExportState::Failed);
+  EXPECT_EQ(report.tail, xpool::devkit::timeline::Tail::Complete);
+  EXPECT_TRUE(report.exact_totals);
+  EXPECT_EQ(report.pending, 0);
+}
+
+TEST(TimelineWireTest, ReservedBytesAndPresenceAreRejected) {
+  auto event = xpool::devkit::timeline::Event{.event_sequence = 1,
+                                              .clock_domain_id = 1,
+                                              .kind = 500,
+                                              .presence = 1U << 3,
+                                              .graph_owner = 1,
+                                              .graph_template = 1,
+                                              .role = 1,
+                                              .data0 = 1,
+                                              .data1 = 1};
+  EXPECT_NO_THROW(event.validate(1, 1));
+  event.reserved_zero = 1;
+  EXPECT_THROW(event.validate(1, 1), xpool::devkit::timeline::ParseError);
+  event.reserved_zero = 0;
+  event.presence |= 1U << 8;
+  EXPECT_THROW(event.validate(1, 1), xpool::devkit::timeline::ParseError);
+}
+
+TEST(TimelineBudgetTest, ChargesCoexistAndReturnOnlyAfterRetirement) {
+  auto budget = xpool::devkit::timeline::MemoryBudget::create(4096);
+  const auto initial = budget->report().used;
+  {
+    auto frame = budget->reserve(xpool::devkit::timeline::MemoryKind::Transfer, 512);
+    auto held = budget->reserve(xpool::devkit::timeline::MemoryKind::Delivery, 1024);
+    EXPECT_EQ(budget->report().used, initial + 1536);
+    EXPECT_THROW(budget->reserve(xpool::devkit::timeline::MemoryKind::Events, 4096),
+                 xpool::devkit::timeline::CollectionError);
+    auto moved = std::move(frame);
+    EXPECT_EQ(budget->report().used, initial + 1536);
+  }
+  EXPECT_EQ(budget->report().used, initial);
+}
+
+TEST(TimelineBudgetTest, IncompleteAndOverflowingRequirementsRejectAdmission) {
+  auto demand = xpool::devkit::timeline::HostRequirements{};
+  EXPECT_THROW(demand.admit(4096), xpool::devkit::timeline::CollectionError);
+  demand = {.events = 0,
+            .control = 0,
+            .transfer = 0,
+            .delivery = 0,
+            .writer = 0,
+            .metadata = 0,
+            .threads = 0,
+            .serialization = 0};
+  EXPECT_EQ(demand.admit(4096), 0);
+  demand.events = static_cast<std::size_t>(-1);
+  demand.transfer = 1;
+  EXPECT_THROW(demand.admit(4096), xpool::devkit::timeline::CollectionError);
+}
+
+TEST(TimelineWireTest, RoutingRetainsIdentityAndLeaseAcrossCapacityOutcomes) {
+  const auto source = xpool::devkit::timeline::BatchSource{.producer = 5, .clock_domain_id = 4};
+  const auto execution =
+      xpool::fabric::LaneExecution{.key = {.instance_index = 0, .invocation_sequence = 3},
+                                   .executor_lease_sequence = 7,
+                                   .layer_ordinal = 2,
+                                   .payload_rows = 2,
+                                   .output_requirement = xpool::ffn::OutputRequirement::PerRankComplete};
+  for (const auto state : {xpool::devkit::timeline::RoutingAttachmentState::Reserved,
+                           xpool::devkit::timeline::RoutingAttachmentState::CapacityExhausted,
+                           xpool::devkit::timeline::RoutingAttachmentState::PayloadOversize}) {
+    auto event = xpool::devkit::timeline::make_routing_event(source, 1, 1, execution, 0, 19, 2, state, 0);
+    event.event_sequence = 1;
+    EXPECT_NO_THROW(event.validate(5, 4));
+    EXPECT_EQ(event.attachment_sequence, 19);
+    EXPECT_EQ(event.lease_sequence, 7);
+    EXPECT_EQ(event.raw_time_ns, 0);
+    EXPECT_EQ(event.data2, 0);
+    EXPECT_EQ(event.data0, static_cast<std::uint64_t>(state));
+  }
+}
+
+TEST(TimelineWireTest, RejectsPreviousContractBeforeMetadataAndPayloadChecks) {
+  auto header = std::array<std::byte, 128>{};
+  const auto signature = std::string_view{"XPOOLC07"};
+  for (auto index = std::size_t{0}; index < signature.size(); ++index)
+    header[index] = static_cast<std::byte>(signature[index]);
+  header[8] = std::byte{6};
+  auto events = std::array<xpool::devkit::timeline::Event, 1>{};
+  try {
+    (void)xpool::devkit::timeline::Chunk::decode(header, {}, events);
+    FAIL() << "accepted unsupported contract version";
+  } catch (const xpool::devkit::timeline::ParseError &error) {
+    EXPECT_EQ(error.code(), xpool::devkit::timeline::ParseErrorCode::UnsupportedVersion);
+  }
+  header[7] = std::byte{'6'};
+  try {
+    (void)xpool::devkit::timeline::Chunk::decode(header, {}, events);
+    FAIL() << "accepted previous contract signature";
+  } catch (const xpool::devkit::timeline::ParseError &error) {
+    EXPECT_EQ(error.code(), xpool::devkit::timeline::ParseErrorCode::BadMagic);
+  }
+}

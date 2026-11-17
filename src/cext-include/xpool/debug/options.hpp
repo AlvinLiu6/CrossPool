@@ -17,9 +17,6 @@ namespace xpool::debug {
 struct TraceObserverOptions {
   /// Whether trace collection is enabled.
   bool enable;
-  /// Configured ring capacity; zero denotes the all-disabled default state.
-  std::size_t record_capacity;
-
   constexpr bool operator==(const TraceObserverOptions &) const = default;
 };
 
@@ -55,8 +52,7 @@ struct Options {
   /// \post Both observer capacities are zero and Graph observation is disabled.
   XPOOL_HOST_DEVICE_FN
   constexpr Options()
-      : transport_observer{false, 0U}, fabric_observer{false, 0U}, graph_observer{false},
-        ffn_routing_observer{false, 0U} {}
+      : transport_observer{false}, fabric_observer{false}, graph_observer{false}, ffn_routing_observer{false, 0U} {}
 
   constexpr bool operator==(const Options &) const = default;
 };

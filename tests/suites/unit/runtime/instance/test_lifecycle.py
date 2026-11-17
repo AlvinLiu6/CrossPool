@@ -223,7 +223,7 @@ def test_instance_waits_through_every_fabric_startup_phase(monkeypatch: pytest.M
             instances=[],
         )
 
-    plan = SimpleNamespace(generation=generation)
+    plan = SimpleNamespace(generation=generation, observation=None)
     monkeypatch.setattr(instance.client, "readiness", readiness, raising=False)
     monkeypatch.setattr(instance.client, "fabric_plan", lambda: plan, raising=False)
     monkeypatch.setattr(xpool.runtime.instance.time, "sleep", lambda _: None)

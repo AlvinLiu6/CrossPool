@@ -63,6 +63,9 @@ struct FabricAtnAgentProtocolEvent final : DeviceObservePoint {
   struct Context;
 
 #if defined(__CUDACC__)
+  /// Prepare observation identity once after the actual Submission is filled,
+  /// before any Prepared/association listener. This dispatch emits no event.
+  XPOOL_DEVICE_FN static void prepare(Context &context);
   /// Dispatch all registered Device observers.
   XPOOL_DEVICE_HOOK_POINT(FabricAtnAgentProtocolEvent);
 #endif

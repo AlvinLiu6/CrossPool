@@ -16,12 +16,12 @@ from xkit.config import assemble_config
 from xkit.device import DevicePool
 from xkit.network import TcpEndpointReservation, TcpPortSpace
 from xpool.config import XpoolConfig
-from xpool.devkit.graph_observer import FfnGraphObserverSnapshot
 from xpool.fabric import FabricGenerationId, InstanceFfnLayerProfile, InstanceFfnProfile
 from xpool.ffn import FfnModelSpec
 from xpool.native.ffn import DpRowLayout, ForwardMode, OutputRequirement
 from xpool.runtime.ffnagent import architecture
 from xpool.runtime.transport import InstanceRankTransportProfile
+from xtest.harness.native.fabric.trace import GraphStructureEvidence
 from xtest.harness.native.ffn.protocol import FfnInstanceReady, FfnInstanceSpec, FfnInvocationSpec
 from xtest.harness.native.ffn.topology import (
     FfnLiveTopologyObservation,
@@ -46,8 +46,9 @@ from xtest.harness.support.ffn import (
     generate_ffn_hidden_states,
 )
 from xtest.harness.support.native.observer import (
-    read_fabric_observer_snapshots,
+    read_fabric_observations,
 )
+from xtest.harness.support.native.timeline import read_sources
 from xtest.harness.support.wait import remaining_seconds
 
 pytest_plugins = ("xtest.harness.support.config",)
@@ -155,7 +156,7 @@ def test_e2e_ffn_topology(
     actual_instance_indices = resolve_instance_indices(case, ready, spec_instance_indices)
     observer_outdir = production_workdir / "observers"
     execution_groups = resolve_execution_groups(case, ready, spec_instance_indices, config=task_config)
-    validate_graph_snapshots(
+    validate_graph_structures(
         observer_outdir,
         generation=generation,
         case=case,
@@ -360,7 +361,7 @@ def resolve_execution_groups(
     return tuple(groups)
 
 
-def validate_graph_snapshots(
+def validate_graph_structures(
     outdir: Path,
     *,
     generation: FabricGenerationId,
@@ -369,30 +370,27 @@ def validate_graph_snapshots(
 ) -> None:
     """Require actual Primary Graph and Lane Graph evidence from every FfnAgent."""
 
-    paths = sorted(outdir.glob(f"xpool.graph-observer.{generation.format()}.*.json"))
-    if len(paths) != case.ffnagent_count:
-        raise AssertionError("topology Graph Observer omitted an FfnAgent snapshot")
-    assigned_ffnagent_indices = {
-        ffnagent_index
-        for entry in ready
-        for execution_group in entry.layer_execution_groups
-        for ffnagent_index in execution_group
-    }
-    lane_counts = set()
-    for path in paths:
-        snapshot = FfnGraphObserverSnapshot.model_validate_json(path.read_text(encoding="utf-8"), strict=True)
-        if snapshot.generation != generation:
-            raise AssertionError("topology Graph Observer generation mismatch")
-        lane_graphs = snapshot.lane_graphs
-        lane_counts.add(len(lane_graphs))
-        primary_graphs = snapshot.primary_graphs
-        ffnagent_index = snapshot.pe - case.atnagent_count
-        if ffnagent_index in assigned_ffnagent_indices and not primary_graphs:
-            raise AssertionError("topology Graph Observer omitted an assigned FfnAgent Primary Graph")
-        if any(graph.binding_site_count <= 0 for graph in primary_graphs):
-            raise AssertionError("topology Graph Observer omitted Primary Graph binding-site evidence")
-    if lane_counts != {case.executor_lane_count}:
-        raise AssertionError(f"topology Graph Observer lane counts mismatch: {lane_counts}")
+    assigned_ffnagent_indices = {index for entry in ready for group in entry.layer_execution_groups for index in group}
+    observed: set[int] = set()
+    for source in read_sources(outdir):
+        metadata = source.metadata
+        own = next(p for p in metadata.producers if p.id == metadata.producer_id)
+        if own.source != "host" or metadata.process.runtime_role != "ffnagent":
+            continue
+        gen = next(g for g in metadata.generations if g.fabric_generation == generation.format())
+        pe = next(member.pe for member in gen.pe_members if member.host_producer == own.id)
+        structures = [
+            GraphStructureEvidence.model_validate_json(path.read_bytes())
+            for path in source.root.glob(f"graph/{own.id}.*.json")
+        ]
+        primary = [s for s in structures if s.kind == "primary"]
+        lanes = [s for s in structures if s.kind == "lane_service"]
+        assert len(lanes) == case.executor_lane_count
+        if pe - case.atnagent_count in assigned_ffnagent_indices:
+            assert primary
+        assert all(s.binding_site_count > 0 for s in primary)
+        observed.add(pe)
+    assert observed == set(range(case.atnagent_count, case.atnagent_count + case.ffnagent_count))
 
 
 def validate_trace(
@@ -405,7 +403,7 @@ def validate_trace(
 ) -> None:
     """Require exact request membership, delivery, rows, and lease evidence."""
 
-    snapshots = read_fabric_observer_snapshots(outdir)
+    snapshots = read_fabric_observations(outdir)
     if len(snapshots) != case.atnagent_count + case.ffnagent_count:
         raise AssertionError("topology Fabric Observer omitted a PE snapshot")
     records = tuple((snapshot["pe"], record) for snapshot in snapshots for record in snapshot["records"])

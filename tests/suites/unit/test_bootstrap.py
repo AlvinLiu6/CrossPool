@@ -20,10 +20,18 @@ def disable_runtime_logging(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(xpool.bootstrap.xpool.logging, "configure", lambda role: None)
 
 
+@pytest.fixture(autouse=True)
+def mock_native_preparation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unit bootstrap substitutes the Native ownership boundary as one unit."""
+
+    monkeypatch.setattr(xpool.bootstrap.xpool.native.devkit.timeline, "configure_policy", lambda *args: None)
+    monkeypatch.setattr(xpool.bootstrap.xpool.native.devkit.timeline, "prepare_budgets", lambda: None)
+
+
 def test_bootstrap_initializes_native_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     """Bootstrap delegates identity ownership before Python-side setup."""
 
-    events: list[tuple[str | RuntimeRole | int | None, ...]] = []
+    events: list[tuple[str | RuntimeRole | int | xpool.bootstrap.xpool.native.debug.Options | None, ...]] = []
     monkeypatch.setattr(xpool.bootstrap.xpool.cext, "ensure_native_loaded", lambda: events.append(("load",)))
     monkeypatch.setattr(
         xpool.bootstrap.xpool.logging,
@@ -46,7 +54,8 @@ def test_bootstrap_initializes_native_runtime(monkeypatch: pytest.MonkeyPatch) -
     assert events[0] == ("load",)
     assert events[1] == ("logging", RuntimeRole.INSTANCE)
     assert events[2][:3] == ("init", RuntimeRole.INSTANCE, 2)
-    assert isinstance(events[2][3], xpool.bootstrap.xpool.native.debug.Options)
+    debug_options = events[2][3]
+    assert isinstance(debug_options, xpool.bootstrap.xpool.native.debug.Options)
     assert events[3] == ("device", 2)
     assert len(events) == 4
 
@@ -67,7 +76,7 @@ def test_bootstrap_sets_resident_process_title_after_native_initialization(
 ) -> None:
     """Successful resident-role bootstrap installs its stable process title."""
 
-    events: list[tuple[str | RuntimeRole | int | None, ...]] = []
+    events: list[tuple[str | RuntimeRole | int | xpool.bootstrap.xpool.native.debug.Options | None, ...]] = []
     monkeypatch.setattr(xpool.bootstrap.xpool.cext, "ensure_native_loaded", lambda: events.append(("load",)))
     monkeypatch.setattr(xpool.bootstrap, "get_global_config", lambda: SimpleNamespace(debug=DebugConfig()))
     monkeypatch.setattr(

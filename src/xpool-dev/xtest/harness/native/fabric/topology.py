@@ -7,6 +7,7 @@ import time
 from contextlib import ExitStack
 from pathlib import Path
 from types import FrameType
+from uuid import uuid4
 
 import torch
 
@@ -16,6 +17,7 @@ from xpool.fabric import FabricUid
 from xpool.memory import FfnExecutionContract
 from xpool.native import RuntimeRole
 from xpool.native.ffn import ForwardMode, LayerKind, OutputRequirement
+from xpool.observation import ObservationParticipant, ObservationPeMember, ObservationPreparation
 from xpool.utils.device import visible_uuids
 from xpool.utils.mps import MPS_CLEANUP_TIMEOUT_S, MpsEndpoint, MpsScope
 from xpool.utils.procs import ProcUniqId
@@ -134,6 +136,7 @@ def run_fabric_topology(
             layer_kind=layer_kind,
             hidden_size=hidden_size,
             intermediate_size=selected_intermediate_size,
+            observation_outdir=workdir / f"observation-{index}",
         )
         for index in range(atnagent_count)
     ) + tuple(
@@ -154,6 +157,7 @@ def run_fabric_topology(
             layer_kind=layer_kind,
             hidden_size=hidden_size,
             intermediate_size=selected_intermediate_size,
+            observation_outdir=workdir / f"observation-{atnagent_count + index}",
         )
         for index in range(ffnagent_count)
     )
@@ -225,6 +229,19 @@ def run_fabric_topology(
             hidden_size=hidden_size,
             intermediate_size=selected_intermediate_size,
         )
+        registered = tuple(
+            process.receive(ObservationParticipant, timeout_seconds=FABRIC_TIMEOUT_SECONDS) for process in participants
+        )
+        observation = ObservationPreparation(
+            run_id=uuid4(),
+            generation_ref=1,
+            participants=registered,
+            pe_members=tuple(
+                ObservationPeMember(pe=i, host_producer=p.host_producer, device_producer=p.device_producer)
+                for i, p in enumerate(registered)
+            ),
+        )
+        fabric_plan = fabric_plan.model_copy(update={"observation": observation})
         plan_dispatch_started = True
         for process in participants:
             process.send(fabric_plan)
@@ -325,7 +342,7 @@ def run_fabric_topology(
                                 )
                                 if isinstance(message, FabricParticipantStopped):
                                     break
-                                if not isinstance(message, FfnExecutionContract):
+                                if not isinstance(message, (FfnExecutionContract, ObservationParticipant)):
                                     raise RuntimeError(f"unexpected Fabric setup stop reply: {message!r}")
                         except Exception as error:
                             early_cleanup_failures.append(error)

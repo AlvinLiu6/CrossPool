@@ -1,23 +1,29 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
+import safetensors
 import torch
+from pydantic import BaseModel, ConfigDict, TypeAdapter
 
 import xpool.native
 from xpool.config import DebugConfig, FabricObserverDebugConfig, FfnRoutingObserverDebugConfig, GraphObserverDebugConfig
 from xpool.native import RuntimeRole
 from xtest.harness.native.fabric.protocol import (
+    DeliveryVariant,
     FabricAtnAgentTrace,
     FabricCoordinatorTrace,
     FabricFailureEvidence,
     FabricFfnAgentTrace,
-    FabricGraphSnapshotEvidence,
+    FabricGraphStructureEvidence,
     FabricParticipantReport,
+    FabricRoutingEvidence,
     FabricRoutingRecordEvidence,
-    FabricRoutingSnapshotEvidence,
     FabricTrace,
 )
+from xtest.harness.support.native.observer import read_fabric_observations
+from xtest.harness.support.native.timeline import read_sources
 
 
 def fabric_debug_options(
@@ -37,115 +43,146 @@ def fabric_debug_options(
     ).native_options()
 
 
+class GraphStructureEvidence(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    kind: Literal["primary", "lane_service"]
+    index: int
+    binding_site_count: int
+    compute_branch_count: int
+    delivery_branch_count: int
+
+
+class RoutingRecordEvidence(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    instance_index: int
+    invocation_sequence: int
+    layer_ordinal: int
+
+
 def fabric_trace_report(
     role: RuntimeRole,
-    snapshot: xpool.native.devkit.fabric_observer.Snapshot,
+    pe: int,
+    outdir: Path,
     failure: xpool.native.fabric.FailurePayload | None,
-    graph_snapshot: xpool.native.devkit.graph_observer.Snapshot | None,
-    routing_snapshot: xpool.native.devkit.ffn_routing_observer.Snapshot | None,
 ) -> FabricParticipantReport:
-    """Copy one bound native snapshot into picklable typed trace facts."""
+    """Read published v7 artifacts after worker retirement, retaining test facts."""
 
+    sources = read_sources(outdir)
+    device = next(
+        source
+        for source in sources
+        if any(p.id == source.metadata.producer_id and p.source == "device" for p in source.metadata.producers)
+    )
+    assert device.quality is not None
+    counters = device.quality.counters
     records: list[FabricTrace] = []
-    for record in snapshot.records:
-        key = record.key
-        if record.kind == xpool.native.devkit.fabric_observer.RecordKind.ATNAGENT:
-            event = xpool.native.devkit.fabric_observer.AtnAgentEvent
-            records.append(
-                FabricAtnAgentTrace(
-                    instance_index=key.instance_index,
-                    invocation_sequence=key.invocation_sequence,
-                    layer_ordinal=record.layer_ordinal,
-                    payload_rows=record.payload_rows,
-                    executor_lane_index=record.executor_lane_index,
-                    executor_lease_sequence=record.executor_lease_sequence,
-                    forward_mode=record.forward_mode,
-                    submission_prepared_ns=record.timestamp(event.SUBMISSION_PREPARED),
-                    output_acknowledgement_published_ns=record.timestamp(event.OUTPUT_ACKNOWLEDGEMENT_PUBLISHED),
+    for source in read_fabric_observations(outdir):
+        if source["pe"] != pe:
+            continue
+        for record in source["records"]:
+            common = {
+                "instance_index": record["instance_index"],
+                "invocation_sequence": record["invocation_sequence"],
+                "layer_ordinal": record["layer_ordinal"],
+                "payload_rows": record["payload_rows"],
+                "executor_lane_index": record["facts"]["executor_lane_index"],
+                "executor_lease_sequence": record["facts"]["executor_lease_sequence"],
+            }
+            events = record["events_ns"]
+            if record["kind"] == "atnagent":
+                records.append(
+                    FabricAtnAgentTrace(
+                        **common,
+                        forward_mode={
+                            "prefill": xpool.native.ffn.ForwardMode.PREFILL,
+                            "decode": xpool.native.ffn.ForwardMode.DECODE,
+                            "idle": xpool.native.ffn.ForwardMode.IDLE,
+                        }[record["facts"]["forward_mode"]],
+                        submission_prepared_ns=events.get("submission_prepared", 0),
+                        output_acknowledgement_published_ns=events.get("output_acknowledgement_published", 0),
+                    )
                 )
-            )
-        elif record.kind == xpool.native.devkit.fabric_observer.RecordKind.COORDINATOR:
-            event = xpool.native.devkit.fabric_observer.CoordinatorEvent
-            records.append(
-                FabricCoordinatorTrace(
-                    instance_index=key.instance_index,
-                    invocation_sequence=key.invocation_sequence,
-                    layer_ordinal=record.layer_ordinal,
-                    payload_rows=record.payload_rows,
-                    executor_lane_index=record.executor_lane_index,
-                    executor_lease_sequence=record.executor_lease_sequence,
-                    ready_ticket=record.ready_ticket,
-                    enqueued_ns=record.timestamp(event.ENQUEUED),
-                    scheduled_ns=record.timestamp(event.SCHEDULED),
-                    lane_released_ns=record.timestamp(event.LANE_RELEASED),
+            elif record["kind"] == "coordinator":
+                scheduler = record["facts"]["scheduler"]
+                records.append(
+                    FabricCoordinatorTrace(
+                        **common,
+                        ready_ticket=scheduler["ready_ticket"] if scheduler["policy"] == "fifo" else None,
+                        enqueued_ns=events.get("enqueued", 0),
+                        scheduled_ns=events.get("scheduled", 0),
+                        lane_released_ns=events.get("lane_released", 0),
+                    )
                 )
-            )
-        elif record.kind == xpool.native.devkit.fabric_observer.RecordKind.FFNAGENT:
-            event = xpool.native.devkit.fabric_observer.FfnAgentEvent
-            records.append(
-                FabricFfnAgentTrace(
-                    instance_index=key.instance_index,
-                    invocation_sequence=key.invocation_sequence,
-                    layer_ordinal=record.layer_ordinal,
-                    payload_rows=record.payload_rows,
-                    executor_lane_index=record.executor_lane_index,
-                    executor_lease_sequence=record.executor_lease_sequence,
-                    payload_row_capacity=record.payload_row_capacity,
-                    delivery=record.delivery,
-                    lane_execution_observed_ns=record.timestamp(event.LANE_EXECUTION_OBSERVED),
-                    compute_started_ns=record.timestamp(event.COMPUTE_STARTED),
-                    compute_completed_ns=record.timestamp(event.COMPUTE_COMPLETED),
-                    completion_published_ns=record.timestamp(event.COMPLETION_PUBLISHED),
+            else:
+                records.append(
+                    FabricFfnAgentTrace(
+                        **common,
+                        payload_row_capacity=record["facts"]["payload_row_capacity"],
+                        delivery={
+                            "direct_partial": DeliveryVariant.DIRECT_PARTIAL,
+                            "single_complete": DeliveryVariant.SINGLE_COMPLETE,
+                            "replicated_complete": DeliveryVariant.REPLICATED_COMPLETE,
+                        }[record["facts"]["delivery"]],
+                        lane_execution_observed_ns=events.get("lane_execution_observed", 0),
+                        compute_started_ns=events.get("compute_started", 0),
+                        compute_completed_ns=events.get("compute_completed", 0),
+                        completion_published_ns=events.get("completion_published", 0),
+                    )
                 )
-            )
-        else:
-            raise RuntimeError(f"native Fabric returned unknown trace kind {record.kind!r}")
+    structures = [
+        GraphStructureEvidence.model_validate_json(path.read_bytes()) for path in sorted(outdir.rglob("graph/*.json"))
+    ]
+    primary = sorted((s for s in structures if s.kind == "primary"), key=lambda s: s.index)
+    lanes = sorted((s for s in structures if s.kind == "lane_service"), key=lambda s: s.index)
+    routing_records: list[FabricRoutingRecordEvidence] = []
+    for path in sorted(outdir.rglob("*.safetensors")):
+        with safetensors.safe_open(path, framework="pt", device="cpu") as data:
+            metadata = data.metadata()
+            assert metadata is not None and metadata["contract_version"] == "7"
+            attachments = TypeAdapter(list[RoutingRecordEvidence]).validate_json(metadata["records"])
+            for index, record in enumerate(attachments):
+                ids = data.get_tensor(f"records.{index}.topk_ids")
+                weights = data.get_tensor(f"records.{index}.topk_weights")
+                routing_records.append(
+                    FabricRoutingRecordEvidence(
+                        record.instance_index,
+                        record.invocation_sequence,
+                        record.layer_ordinal,
+                        ids.shape[0],
+                        ids.shape[1],
+                        bytes(ids.view(torch.uint8).flatten().tolist()),
+                        bytes(weights.view(torch.uint8).flatten().tolist()),
+                    )
+                )
     return FabricParticipantReport(
         role=role,
-        pe=snapshot.pe,
-        sequence=snapshot.sequence,
-        dropped=snapshot.dropped,
+        pe=pe,
+        sequence=counters.attempted,
+        dropped=counters.dropped_full + counters.post_commit_lost,
         records=tuple(records),
-        failure=(
-            None
-            if failure is None
-            else FabricFailureEvidence(
-                result_code=failure.result_code,
-                origin_pe=failure.origin_pe,
-                instance_index=failure.key.instance_index,
-                invocation_sequence=failure.key.invocation_sequence,
-                layer_ordinal=failure.layer_ordinal,
-            )
+        failure=None
+        if failure is None
+        else FabricFailureEvidence(
+            failure.result_code,
+            failure.origin_pe,
+            failure.key.instance_index,
+            failure.key.invocation_sequence,
+            failure.layer_ordinal,
         ),
-        graph_snapshot=(
-            None
-            if graph_snapshot is None
-            else FabricGraphSnapshotEvidence(
-                primary_graph_binding_site_counts=tuple(
-                    primary_graph.binding_site_count for primary_graph in graph_snapshot.primary_graphs
-                ),
-                lane_compute_branch_counts=tuple(lane.compute_branch_count for lane in graph_snapshot.lane_graphs),
-                lane_delivery_branch_counts=tuple(lane.delivery_branch_count for lane in graph_snapshot.lane_graphs),
-            )
-        ),
-        routing=(
-            None
-            if routing_snapshot is None
-            else FabricRoutingSnapshotEvidence(
-                sequence=routing_snapshot.sequence,
-                dropped=routing_snapshot.dropped,
-                records=tuple(
-                    FabricRoutingRecordEvidence(
-                        instance_index=record.key.instance_index,
-                        invocation_sequence=record.key.invocation_sequence,
-                        layer_ordinal=record.layer_ordinal,
-                        row_count=record.topk_ids.shape[0],
-                        effective_topk=record.topk_ids.shape[1],
-                        topk_ids_bytes=bytes(record.topk_ids.view(torch.uint8).flatten().tolist()),
-                        topk_weights_bytes=bytes(record.topk_weights.view(torch.uint8).flatten().tolist()),
-                    )
-                    for record in routing_snapshot.records
-                ),
-            )
-        ),
+        graph_structure=FabricGraphStructureEvidence(
+            tuple(s.binding_site_count for s in primary),
+            tuple(s.compute_branch_count for s in lanes),
+            tuple(s.delivery_branch_count for s in lanes),
+        )
+        if role is RuntimeRole.FFNAGENT
+        else None,
+        routing=FabricRoutingEvidence(
+            counters.attachment_attempted,
+            counters.attachment_capacity_exhausted
+            + counters.attachment_payload_oversize
+            + counters.attachment_publish_failed,
+            tuple(routing_records),
+        )
+        if role is RuntimeRole.FFNAGENT
+        else None,
     )

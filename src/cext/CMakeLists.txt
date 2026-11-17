@@ -32,12 +32,15 @@ target_include_directories(xpool_abi INTERFACE ${XPOOL_CEXT_INCLUDE_DIR})
 target_link_libraries(xpool_abi INTERFACE CCCL::libcudacxx)
 target_compile_features(xpool_abi INTERFACE cxx_std_20)
 
+find_package(Threads REQUIRED)
+
 add_library(xpool_cext_core STATIC ${XPOOL_CEXT_SOURCES} ${XPOOL_CEXT_HEADERS})
 target_link_libraries(
   xpool_cext_core
   PRIVATE
     xpool_abi
     xpool_compiler_options
+    Threads::Threads
     NVSHMEM::NVSHMEM
     ${TORCH_LIBRARIES}
     CUDA::cuda_driver

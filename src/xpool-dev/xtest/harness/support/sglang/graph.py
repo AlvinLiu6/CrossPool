@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from xkit.serving.sglang.graph import SglangGraphSettings
-from xpool.integrations.sglang.devkit import SglangGraphEvent
 from xtest.harness.sglang.serving.attempt import ProbeRun
+from xtest.harness.sglang.serving.graph import GraphObservation
 
 
 def assert_run_graph_evidence(run: ProbeRun) -> None:
@@ -19,7 +19,7 @@ def assert_run_graph_evidence(run: ProbeRun) -> None:
 
 def assert_graph_events(
     graph_settings: SglangGraphSettings,
-    events: list[SglangGraphEvent],
+    events: list[GraphObservation],
 ) -> None:
     """Require capture and execution evidence for every resolved graph mode."""
 

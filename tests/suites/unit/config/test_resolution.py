@@ -284,8 +284,8 @@ def test_init_global_config_rejects_different_effective_config(tmp_path: Path) -
 
 
 def test_init_global_config_tracks_effective_sources(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("XPOOL_DEBUG_FABRIC_OBSERVER_RECORD_CAPACITY", raising=False)
-    monkeypatch.setenv("XPOOL_DEBUG_TRANSPORT_OBSERVER_RECORD_CAPACITY", "64")
+    monkeypatch.delenv("XPOOL_DEBUG_TIMELINE_CONTEXT_SLOT_CAPACITY", raising=False)
+    monkeypatch.setenv("XPOOL_DEBUG_TIMELINE_DEVICE_EVENT_SLOT_CAPACITY", "64")
     config = init_global_config(
         config_path="configs/xpool.example.toml",
         cli={"daemon_host": "127.0.0.6"},
@@ -299,15 +299,15 @@ def test_init_global_config_tracks_effective_sources(monkeypatch: pytest.MonkeyP
         "source": ConfigSource.CLI,
         "value": "127.0.0.6",
     }
-    assert sources["debug.transport_observer.record_capacity"] == {
-        "name": "debug.transport_observer.record_capacity",
+    assert sources["debug.timeline.device_event_slot_capacity"] == {
+        "name": "debug.timeline.device_event_slot_capacity",
         "source": ConfigSource.ENV,
         "value": 64,
     }
-    assert sources["debug.fabric_observer.record_capacity"] == {
-        "name": "debug.fabric_observer.record_capacity",
+    assert sources["debug.timeline.context_slot_capacity"] == {
+        "name": "debug.timeline.context_slot_capacity",
         "source": ConfigSource.DEFAULT,
-        "value": 8192,
+        "value": 64,
     }
     assert sources["daemon.port"]["source"] == ConfigSource.CONFIG
     assert sources["atn.devices"]["source"] == ConfigSource.CONFIG

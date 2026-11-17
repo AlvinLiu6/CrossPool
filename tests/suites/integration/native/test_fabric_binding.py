@@ -170,21 +170,22 @@ def isolated_native_allocation_sizing() -> None:
 
 
 def isolated_enabled_observer_sizing() -> None:
-    xpool.native.initialize(
-        RuntimeRole.DAEMON,
-        None,
-        DebugConfig(
-            fabric_observer=FabricObserverDebugConfig(enable=True, outdir=Path.cwd(), record_capacity=2),
-            ffn_routing_observer=FfnRoutingObserverDebugConfig(enable=True, outdir=Path.cwd(), record_capacity=2),
-        ).native_options(),
+    debug = DebugConfig(
+        fabric_observer=FabricObserverDebugConfig(enable=True, outdir=Path.cwd()),
+        ffn_routing_observer=FfnRoutingObserverDebugConfig(enable=True, outdir=Path.cwd(), record_capacity=2),
     )
+    options = debug.native_options()
+    xpool.native.devkit.timeline.configure_policy(debug.timeline.native_options(), options, bytes(32))
+    xpool.native.initialize(RuntimeRole.DAEMON, None, options)
     fabric_bytes = xpool.native.devkit.fabric_observer.allocation_bytes(2, 2)
     assert fabric_bytes > 0
     assert xpool.native.devkit.fabric_observer.allocation_bytes(2, 2) == fabric_bytes
-    with pytest.raises(RuntimeError, match="positive Instance and executor-Lane counts"):
+    with pytest.raises(RuntimeError, match="positive Instance table"):
         xpool.native.devkit.fabric_observer.allocation_bytes(0, 2)
     assert xpool.native.devkit.ffn_routing_observer.allocation_bytes(0) == 0
-    assert xpool.native.devkit.ffn_routing_observer.allocation_bytes(8) > 0
+    assert xpool.native.devkit.ffn_routing_observer.allocation_bytes(
+        8
+    ) > xpool.native.devkit.ffn_routing_observer.allocation_bytes(0)
 
 
 @xtest.requirements(device_count=1)

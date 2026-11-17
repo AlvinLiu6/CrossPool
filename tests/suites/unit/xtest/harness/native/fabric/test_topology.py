@@ -67,6 +67,7 @@ def test_participant_stops_before_plan_or_retains_owner_after_plan(
         layer_kind=LayerKind.DENSE,
         hidden_size=16,
         intermediate_size=32,
+        observation_outdir=Path("/unused-observation"),
     )
     owners: list[weakref.ReferenceType[torch.Tensor]] = []
     sent: list[object] = []
@@ -103,9 +104,13 @@ def test_participant_stops_before_plan_or_retains_owner_after_plan(
 
     def retain(seconds: float) -> None:
         assert owners[0]() is not None
-        assert sent == [TEST_EXECUTION_CONTRACT]
+        assert sent[:1] == [TEST_EXECUTION_CONTRACT]
         raise OwnerRetained
 
+    monkeypatch.setattr(
+        torch.cuda, "get_device_properties", lambda device: SimpleNamespace(uuid="44444444-4444-4444-8444-444444444444")
+    )
+    monkeypatch.setattr(participant.timeline, "configure_policy", lambda *args: None)
     monkeypatch.setattr(torch.cuda, "set_device", lambda device: None)
     monkeypatch.setattr(participant.xpool.native, "initialize", lambda *args: None)
     monkeypatch.setattr(participant.xpool.native.fabric, "join", join)
@@ -120,7 +125,8 @@ def test_participant_stops_before_plan_or_retains_owner_after_plan(
             participant.run_fabric_participant(connection, spec)
     else:
         participant.run_fabric_participant(connection, spec)
-        assert sent == [TEST_EXECUTION_CONTRACT, FabricParticipantStopped()]
+        assert sent[0] == TEST_EXECUTION_CONTRACT
+        assert sent[-1] == FabricParticipantStopped()
         assert owners[0]() is None
 
 

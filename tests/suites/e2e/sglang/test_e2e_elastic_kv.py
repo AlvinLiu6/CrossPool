@@ -22,8 +22,8 @@ from xtest.harness.sglang.serving.alignment import assert_prefill_alignment
 from xtest.harness.sglang.serving.probe import run_probe
 from xtest.harness.sglang.serving.server import NEW_TOKENS, SglangProbeServer, SglangServerResult
 from xtest.harness.support.native.observer import (
-    assert_fabric_observer_snapshots,
-    assert_transport_observer_snapshots,
+    assert_fabric_observations,
+    assert_transport_observations,
     assert_two_model_executor_overlap,
 )
 from xtest.harness.support.sglang.graph import assert_run_graph_evidence
@@ -216,12 +216,12 @@ def test_e2e_elastic_kv(
         workdir=tmp_path,
         workload=requests,
     )
-    assert_transport_observer_snapshots(
+    assert_transport_observations(
         run.observer_outdir,
         expected_count=case.atnagent_count * len(case.models),
         site="atnagent",
     )
-    assert_fabric_observer_snapshots(
+    assert_fabric_observations(
         run.observer_outdir,
         atnagent_count=case.atnagent_count,
         ffnagent_count=case.ffnagent_count,

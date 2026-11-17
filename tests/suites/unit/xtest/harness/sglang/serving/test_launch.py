@@ -53,8 +53,6 @@ def test_prepare_applies_deployment_policy_and_sanitizes_environment(
     assert launch.config.ffn.device_memory_calibration == base_config.config.ffn.device_memory_calibration
     assert launch.environment["CUDA_MODULE_LOADING"] == "EAGER"
     assert "SGLANG_GRPC_PORT" not in launch.environment
-    assert launch.config.debug.transport_observer.record_capacity == 32_768
-    assert launch.config.debug.fabric_observer.record_capacity == 65_536
     assert launch.config.debug.prefill_logit_observer.enable is (case.elastic_kv is not None)
     assert ("XPOOL_DEBUG_PREFILL_LOGIT_OBSERVER_ENABLE" in launch.environment) is (case.elastic_kv is not None)
 

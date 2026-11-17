@@ -12,10 +12,8 @@ namespace xpool::bindings {
 void bind_debug(py::module_ &module) {
   auto debug = module.def_submodule("debug", "Native debug options.");
   py::class_<xpool::debug::TraceObserverOptions>(debug, "TraceObserverOptions", "Immutable native trace options.")
-      .def(py::init([](bool enable, std::size_t record_capacity) {
-             return xpool::debug::TraceObserverOptions{enable, record_capacity};
-           }),
-           py::arg("enable"), py::arg("record_capacity"));
+      .def(py::init([](bool enable) { return xpool::debug::TraceObserverOptions{enable}; }), py::arg("enable"))
+      .def_readonly("enable", &xpool::debug::TraceObserverOptions::enable, "Whether event collection is enabled.");
 
   py::class_<xpool::debug::GraphObserverOptions>(debug, "GraphObserverOptions",
                                                  "Immutable native Graph Observer options.")

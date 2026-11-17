@@ -481,14 +481,14 @@ reuse the test probe's fixed requests and verdict policy. The shared installed
 SGLang launch retains its bounded policy: CP one, engine random seed zero,
 trust-remote-code and error-level logs.
 
-Test observation readers consume the producer-owned declarations described in
-[Devkit](devkit.md#serialized-observations). Fabric, Transport and SGLang Graph
-file readers validate declared fields at input with strict `TypeAdapter`
-validation and retain unknown fields, including nested extensions. A required
-nullable field still requires its key; explicit null can represent an incomplete
-lifecycle fact. Private semantic assertions use the validated records and own
-completeness, ordering and correspondence checks. Native Graph readers reuse
-`FfnGraphObserverSnapshot` and its existing validation policy.
+Test observation readers consume version-7 raw chunks and immutable metadata
+from [Devkit](devkit.md#serialized-observations). The test-only reader checks
+chunk/header CRC, exact metadata SHA-256 prefixes, Run/Producer membership and
+reserved bytes before deriving protocol facts. Typed structure and Routing
+attachment readers retain original identities and check artifact metadata and
+tensor shape/dtypes. Private semantic assertions own completeness, ordering and
+correspondence checks. Quality counters remain cumulative Source evidence;
+missing or uncertain totals are not replaced with zero.
 
 ## Test inventory, execution and retained verdicts
 

@@ -3,23 +3,30 @@ from __future__ import annotations
 import logging
 import os
 import time
+from hashlib import sha256
 from multiprocessing.connection import Connection
+from uuid import uuid4
 
 import torch
 
 import xpool.native
 from xpool.cext import ensure_native_loaded
+from xpool.config import DebugConfig, FabricObserverDebugConfig, FfnRoutingObserverDebugConfig, GraphObserverDebugConfig
 from xpool.fabric import FabricPlan
 from xpool.memory import FfnExecutionContract
 from xpool.native import RuntimeRole
+from xpool.native.devkit import timeline
 from xpool.native.ffn import LayerKind
+from xpool.observation import ObservationDeviceRequest, ObservationParticipant, host_creation_id, process_start_key
 from xpool.runtime.agent import project_fabric_arena
 from xpool.runtime.ffnagent import capture_workspace
 from xpool.runtime.ffnagent.execution import OwnedExecutionResource
 from xpool.runtime.ffnagent.registry import FfnExecutionRegistry
 from xpool.runtime.ffnagent.weights import FfnLayerWeights
+from xpool.runtime.observation import source_capabilities, source_metadata
 from xpool.utils.device import visible_uuids
 from xpool.utils.mps import MpsEndpoint
+from xpool.utils.procs import ProcUniqId
 from xtest.harness.native.fabric.protocol import (
     FabricArenasPublished,
     FabricParticipantCommand,
@@ -29,7 +36,7 @@ from xtest.harness.native.fabric.protocol import (
     FabricParticipantSpec,
     FabricParticipantStopped,
 )
-from xtest.harness.native.fabric.trace import fabric_debug_options, fabric_trace_report
+from xtest.harness.native.fabric.trace import fabric_trace_report
 from xtest.harness.native.ffn.qualification import (
     dense_layer_weights,
     execution_model_specs,
@@ -47,13 +54,35 @@ def run_fabric_participant(connection: Connection, spec: FabricParticipantSpec) 
     torch.cuda.set_device(spec.device)
     if spec.role is RuntimeRole.ATNAGENT:
         MpsEndpoint(visible_uuids()[: spec.atnagent_count]).require_client()
-    xpool.native.initialize(
-        spec.role,
-        spec.device,
-        fabric_debug_options(
-            graph_observer=True,
-            routing_observer=spec.layer_kind is LayerKind.MOE,
+    debug = DebugConfig(
+        fabric_observer=FabricObserverDebugConfig(enable=True, outdir=spec.observation_outdir),
+        graph_observer=GraphObserverDebugConfig(enable=True, outdir=spec.observation_outdir),
+        ffn_routing_observer=FfnRoutingObserverDebugConfig(
+            enable=spec.layer_kind is LayerKind.MOE,
+            outdir=spec.observation_outdir if spec.layer_kind is LayerKind.MOE else None,
+            record_capacity=8,
         ),
+    )
+    options = debug.native_options()
+    fingerprint = sha256(debug.model_dump_json().encode()).digest()
+    timeline.configure_policy(debug.timeline.native_options(), options, fingerprint)
+    xpool.native.initialize(spec.role, spec.device, options)
+    request = ObservationDeviceRequest(
+        host_creation_id=host_creation_id(),
+        start_key=process_start_key(ProcUniqId.current()),
+        policy_sha256=fingerprint.hex(),
+        logical_device=spec.device,
+        physical_device_uuid=f"GPU-{str(torch.cuda.get_device_properties(spec.device).uuid).removeprefix('GPU-')}",
+    )
+    participant = ObservationParticipant(
+        creation_id=uuid4(),
+        pid=os.getpid(),
+        runtime_role="atnagent" if spec.role is RuntimeRole.ATNAGENT else "ffnagent",
+        request=request,
+        host_producer=2 * spec.pe + 1,
+        host_clock=1,
+        device_producer=2 * spec.pe + 2,
+        device_clock=spec.pe + 2,
     )
     finalized = False
     execution_registry: FfnExecutionRegistry | None = None
@@ -62,6 +91,7 @@ def run_fabric_participant(connection: Connection, spec: FabricParticipantSpec) 
     if spec.role is RuntimeRole.FFNAGENT:
         execution_contract, external_resources = capture_workspace.prepare_execution_sources()
         connection.send(execution_contract)
+    connection.send(participant)
     fabric_plan = connection.recv()
     if fabric_plan is FabricParticipantCommand.STOP:
         connection.send(FabricParticipantStopped())
@@ -73,7 +103,37 @@ def run_fabric_participant(connection: Connection, spec: FabricParticipantSpec) 
             fabric_plan.ffn_execution_contracts[spec.pe - spec.atnagent_count] != execution_contract
         ):
             raise RuntimeError("Fabric Plan disagrees with the participant's execution facts")
+        budgets = timeline.prepare_budgets()
+        policy = timeline.read_policy()
+        if budgets is None or policy is None:
+            raise RuntimeError("Fabric observation budgets were not prepared")
+        host_metadata = source_metadata(
+            budgets.host,
+            policy,
+            fabric_plan,
+            participant.native_process(fabric_plan.observation.run_id).host,
+            source_capabilities(policy, spec.role, fabric_plan, participant.device_producer),
+        )
+        capabilities = source_capabilities(policy, spec.role, fabric_plan, participant.device_producer)
+        capabilities.fabric = timeline.MetadataCapability.enabled
+        device_metadata = source_metadata(
+            budgets.host, policy, fabric_plan, participant.native_device(fabric_plan.observation.run_id), capabilities
+        )
         projection = project_fabric_arena(fabric_plan)
+        xpool.native.devkit.fabric_observer.prepare(
+            device_metadata, 1, projection, spec.pe, str(spec.observation_outdir)
+        )
+        xpool.native.devkit.graph_observer.prepare_attachments(
+            host_metadata,
+            device_metadata,
+            spec.device,
+            1,
+            str(spec.observation_outdir),
+            str(spec.observation_outdir),
+            xpool.native.devkit.ffn_routing_observer.memory_demand(projection, spec.pe - spec.atnagent_count)
+            if spec.role is RuntimeRole.FFNAGENT
+            else xpool.native.devkit.ffn_routing_observer.MemoryDemand(),
+        )
         xpool.native.fabric.join(projection, spec.pe)
         if spec.role is RuntimeRole.FFNAGENT:
             ffnagent_index = spec.pe - spec.atnagent_count
@@ -164,22 +224,9 @@ def run_fabric_participant(connection: Connection, spec: FabricParticipantSpec) 
         xpool.native.fabric.drain_async()
         if xpool.native.fabric.drain_pending():
             raise RuntimeError("completed Fabric drain became pending again")
-        snapshot = xpool.native.devkit.fabric_observer.read()
-        if snapshot is None:
-            raise RuntimeError("Fabric trace observation was enabled but returned no snapshot")
-        graph_snapshot = xpool.native.devkit.graph_observer.read() if spec.role is RuntimeRole.FFNAGENT else None
-        routing_snapshot = (
-            xpool.native.devkit.ffn_routing_observer.read()
-            if spec.role is RuntimeRole.FFNAGENT and spec.layer_kind is LayerKind.MOE
-            else None
-        )
-        report = fabric_trace_report(
-            spec.role,
-            snapshot,
-            xpool.native.fabric.failure(),
-            graph_snapshot,
-            routing_snapshot,
-        )
+        if spec.role is RuntimeRole.FFNAGENT and spec.layer_kind is LayerKind.MOE:
+            xpool.native.devkit.ffn_routing_observer.collect_drained()
+        failure = xpool.native.fabric.failure()
         xpool.native.fabric.finalize()
         if execution_registry is not None:
             execution_registry.close()
@@ -197,6 +244,11 @@ def run_fabric_participant(connection: Connection, spec: FabricParticipantSpec) 
                 raise RuntimeError("Fabric drain operation was accepted after finalization")
         if arenas:
             xpool.native.transport.destroy_arenas(arenas)
+        if not xpool.native.devkit.fabric_observer.finish_retirement():
+            raise RuntimeError("Fabric observation workers did not retire")
+        if not xpool.native.devkit.graph_observer.finish_attachments(True):
+            raise RuntimeError("Fabric attachment owner did not retire")
+        report = fabric_trace_report(spec.role, spec.pe, spec.observation_outdir, failure)
         connection.send(FabricParticipantDrained(report))
     except BaseException:
         if finalized:

@@ -57,6 +57,7 @@ class FfnAgent(Agent):
         torch.cuda.empty_cache()
         device_free_memory_bytes, device_total_memory_bytes = torch.cuda.mem_get_info(self.device)
         self.registration = FfnAgentRegistration(
+            observation=self.observation_request,
             device=device,
             calibration_environment=calibration_environment,
             device_free_memory_bytes=device_free_memory_bytes,

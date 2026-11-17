@@ -40,6 +40,38 @@ daemon-owned endpoint, while FFN uses an empty pipe value to bypass MPS. Keep
 endpoint selection out of machine-local `.env` files. See
 [managed startup](designs/control-plane.md#startup-and-shutdown).
 
+## Bounded timeline preparation
+
+`debug.timeline` is an immutable version-7 preparation policy. Its fields use the
+existing environment-only debug source rule: set `XPOOL_DEBUG_TIMELINE_ENABLE`
+and `XPOOL_DEBUG_TIMELINE_OUTDIR` together. The complete environment template
+is in [`.env.example`](../.env.example); these settings are rejected in TOML.
+Directories resolve from the working directory. Independent mode respects each
+Observer outdir while sharing process collection workers and disk quota. Prefer
+sibling outdirs under one capture root for offline input manifests; see
+[Devkit artifact layout](designs/devkit.md#serialized-observations). Unified mode
+uses debug.timeline.outdir for every class.
+
+Defaults are 8 MiB of collection memory per process/Device, 32 MiB of Host
+collection memory per process, a 100 ms scan interval, at most 1 MiB per complete
+chunk, and a 1 GiB shared disk quota with an 8 MiB metadata/close reserve.
+Shutdown adds at most 5000 ms within the production deadline; calibration blocks
+contain exactly ten attempts. Event/Endpoint/Context/sampler capacities default
+to 16384/8/64/1. Positive resource values, native integer widths, chunk bounds,
+and space for both metadata and a chunk are validated before preparation.
+
+The 4,459,336-byte default Device logical minimum is a lower bound. Preparation
+must also account for active categories, allocation rounding, transfer scratch
+and every implementation-owned resource. Host admission requires explicit
+owner declarations for actual allocations and simultaneous copy/serialization
+storage. Missing sizes fail admission; they are not assumed to be zero. Transport
+and Fabric Event capacities use timeline limits; Routing tensor record capacity
+is separate from Event capacity.
+
+Independent observers use the bounded version-7 collection service.
+`DebugConfig.native_options()` rejects unified mode until Dynamic Context,
+calibration and complete association providers are connected.
+
 ## Development tools and shared cache
 
 Copy `configs/xkit.example.toml` to ignored `configs/xkit.local.toml` and select it
@@ -175,3 +207,9 @@ At startup, an explicitly configured profile must exist and match the
 deployment environment; startup reports missing, malformed, or incompatible
 profiles. Regenerate calibration after allocation, estimation, or qualified
 environment changes even if an earlier file remains schema-compatible.
+
+The independent SGLang Graph observer records Host Events through the shared
+Native collection service and its configured Graph outdir. Hooks retain bounded
+failure diagnostics; close reports them outside execution Hooks. Runtime shutdown
+owns final Source retirement and Writer joining. Existing destination files
+remain intact and cause an explicit publication failure.

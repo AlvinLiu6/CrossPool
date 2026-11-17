@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Self, cast
+from typing import Annotated, Literal, Self
 
 import safetensors
 import torch
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
 from xpool.fabric import FabricGenerationId
 from xpool.model import ModelId
 from xpool.utils.dtype import TorchDtype
+from xtest.harness.support.native.timeline import Metadata
 
 NORMALIZED_RMSE_DENOMINATOR_FLOOR = 1e-12
 FFN_NUMERICAL_ARTIFACT_FILENAME = "ffn-numerical.json"
@@ -59,6 +59,15 @@ def generate_ffn_hidden_states(
     return tuple(full[:row_count].clone() for row_count in row_counts)
 
 
+class RoutingAttachmentMetadata(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    generation: int
+    status: Literal["published"]
+    instance_index: int
+    invocation_sequence: int
+    layer_ordinal: int
+
+
 def read_ffn_routing_records(
     directory: Path,
     generation: FabricGenerationId,
@@ -66,56 +75,36 @@ def read_ffn_routing_records(
     """Read complete, non-dropped Routing Observer records for one generation."""
 
     records_by_key: dict[tuple[int, int, int], tuple[torch.Tensor, torch.Tensor]] = {}
-    paths = tuple(sorted(directory.glob(f"xpool.ffn-routing-observer.{generation.format()}.*.safetensors")))
+    paths = tuple(sorted(directory.rglob("routing/*.safetensors")))
     if not paths:
-        raise AssertionError("FFN Routing Observer produced no generation artifacts")
+        raise AssertionError("Routing collection produced no artifacts")
     for path in paths:
         with safetensors.safe_open(str(path), framework="pt", device="cpu") as snapshot:
             metadata = snapshot.metadata()
-            if metadata is None or set(metadata) != {"generation", "pe", "sequence", "dropped", "records"}:
-                raise AssertionError(f"FFN Routing Observer metadata is invalid in {path}")
-            if metadata["generation"] != generation.format():
-                raise AssertionError(f"FFN Routing Observer generation is invalid in {path}")
-            try:
-                sequence = int(metadata["sequence"])
-                dropped = int(metadata["dropped"])
-                pe = int(metadata["pe"])
-                record_metadata = json.loads(metadata["records"])
-            except (ValueError, json.JSONDecodeError) as error:
-                raise AssertionError(f"FFN Routing Observer metadata is malformed in {path}") from error
-            if min(sequence, dropped, pe) < 0 or dropped != 0:
-                raise AssertionError(f"FFN Routing Observer dropped or invalid records in {path}")
-            if not isinstance(record_metadata, list) or len(record_metadata) != sequence:
-                raise AssertionError(f"FFN Routing Observer record count is invalid in {path}")
+            if (
+                metadata is None
+                or set(metadata) != {"contract_version", "run_id", "producer_id", "records"}
+                or metadata["contract_version"] != "7"
+            ):
+                raise AssertionError(f"Routing artifact metadata is invalid in {path}")
+            producer = int(metadata["producer_id"])
+            root = path.parent.parent
+            revisions = list(root.glob(f"metadata.{producer}.*.json"))
+            declaration = Metadata.model_validate_json(
+                max(revisions, key=lambda p: int(p.name.split(".")[2])).read_bytes()
+            )
+            generation_refs = {g.id for g in declaration.generations if g.fabric_generation == generation.format()}
+            records = TypeAdapter(list[RoutingAttachmentMetadata]).validate_json(metadata["records"])
             expected_tensor_keys: set[str] = set()
-            for ordinal, raw_record in enumerate(record_metadata):
-                if (
-                    not isinstance(raw_record, dict)
-                    or tuple(raw_record)
-                    != (
-                        "instance_index",
-                        "invocation_sequence",
-                        "layer_ordinal",
-                    )
-                    or any(not isinstance(value, int) or isinstance(value, bool) for value in raw_record.values())
-                ):
-                    raise AssertionError(f"FFN Routing Observer record metadata is invalid in {path}")
-                typed_record = cast(dict[str, int], raw_record)
-                key = (
-                    typed_record["instance_index"],
-                    typed_record["invocation_sequence"],
-                    typed_record["layer_ordinal"],
-                )
+            for ordinal, record in enumerate(records):
+                assert record.generation in generation_refs and record.status == "published"
+                key = (record.instance_index, record.invocation_sequence, record.layer_ordinal)
                 if key in records_by_key:
-                    raise AssertionError(f"FFN Routing Observer duplicated business key {key}")
-                ids_key = f"records.{ordinal}.topk_ids"
-                weights_key = f"records.{ordinal}.topk_weights"
+                    raise AssertionError(f"Routing attachment duplicated Invocation/layer key {key}")
+                ids_key, weights_key = f"records.{ordinal}.topk_ids", f"records.{ordinal}.topk_weights"
                 expected_tensor_keys.update((ids_key, weights_key))
-                ids = snapshot.get_tensor(ids_key)
-                weights = snapshot.get_tensor(weights_key)
-                records_by_key[key] = (ids, weights)
-            if set(snapshot.keys()) != expected_tensor_keys:
-                raise AssertionError(f"FFN Routing Observer tensor keys are invalid in {path}")
+                records_by_key[key] = (snapshot.get_tensor(ids_key), snapshot.get_tensor(weights_key))
+            assert set(snapshot.keys()) == expected_tensor_keys
     return records_by_key
 
 

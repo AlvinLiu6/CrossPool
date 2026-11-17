@@ -21,8 +21,8 @@ from xtest.harness.sglang.serving.alignment import (
 from xtest.harness.sglang.serving.probe import run_probe
 from xtest.harness.support.native.observer import (
     assert_dp_attention_paths,
-    assert_fabric_observer_snapshots,
-    assert_transport_observer_snapshots,
+    assert_fabric_observations,
+    assert_transport_observations,
     assert_two_model_executor_overlap,
 )
 from xtest.harness.support.sglang.graph import assert_run_graph_evidence
@@ -76,12 +76,12 @@ def run_serving_case(
         graph_settings=graph_mode.settings(),
         workdir=tmp_path,
     )
-    assert_transport_observer_snapshots(
+    assert_transport_observations(
         run.observer_outdir,
         expected_count=case.atnagent_count * len(case.models),
         site="atnagent",
     )
-    assert_fabric_observer_snapshots(
+    assert_fabric_observations(
         run.observer_outdir,
         atnagent_count=case.atnagent_count,
         ffnagent_count=case.ffnagent_count,

@@ -34,7 +34,7 @@ protected:
     ASSERT_TRUE(cuda_succeeded(cudaSetDevice(0)));
 
     auto debug_options = xpool::debug::Options{};
-    debug_options.transport_observer = {true, 2};
+    debug_options.transport_observer = {true};
     xpool::debug::configure(debug_options, 0);
 
     const auto layout = xpool::transport::ArenaLayout::create(0, 0, 0, 1, 0, 1, 2, 2, c10::ScalarType::Half);

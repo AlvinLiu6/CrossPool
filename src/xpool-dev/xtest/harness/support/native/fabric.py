@@ -40,7 +40,7 @@ def assert_fabric_report(
             assert participant.routing.dropped == 0
             assert participant.routing.sequence == len(participant.routing.records)
         if not participant.records:
-            snapshot = participant.graph_snapshot
+            snapshot = participant.graph_structure
             assert participant.role is RuntimeRole.FFNAGENT
             assert snapshot is not None
             assert snapshot.primary_graph_binding_site_counts == ()

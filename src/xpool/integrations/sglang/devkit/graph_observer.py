@@ -1,160 +1,111 @@
-"""SGLang Devkit observer for CUDA Graph capture and execution events."""
+"""Registered v7 Host Graph events for SGLang runner calls."""
 
 from __future__ import annotations
 
+import atexit
 import functools
-import json
 import logging
-import os
 import time
 from collections.abc import Callable
-from pathlib import Path
-from threading import Lock
-from typing import Literal, TextIO
+from typing import Literal
+from weakref import WeakKeyDictionary
 
 from sglang.srt.model_executor.runner.decode_cuda_graph_runner import DecodeCudaGraphRunner
 from sglang.srt.model_executor.runner.prefill_cuda_graph_runner import PrefillCudaGraphRunner
 
-from xpool.config import get_global_config
-from xpool.integrations.sglang.devkit import SglangGraphEvent
+import xpool.native.devkit.graph_observer
 from xpool.native import RuntimeRole
 
-__all__ = ["install"]
-
+__all__ = ["close", "install"]
 runtime_roles = frozenset({RuntimeRole.INSTANCE})
-
 logger = logging.getLogger(__name__)
+installed = False
+enqueue_failures = 0
+first_failure = ""
 
 type GraphRunner = DecodeCudaGraphRunner | PrefillCudaGraphRunner
 type ForwardPhase = Literal["decode", "prefill"]
 type GraphOperation = Literal["capture", "execute"]
 
-event_file: Path | None = None
-event_handle: TextIO | None = None
-install_lock = Lock()
-write_lock = Lock()
-installed = False
+templates: WeakKeyDictionary[GraphRunner, int] = WeakKeyDictionary()
 
 
 def install() -> None:
-    """Install the SGLang graph observer when enabled by CrossPool config.
+    """Wrap actual methods; runtime preparation supplies registered Sources."""
 
-    Raises:
-        MissingRequiredConfig: If no process-global config has been installed.
-        RuntimeError: If graph-observer install is invoked while the resolved
-            config does not provide an output directory.
-        OSError: If the configured output directory or per-process event file
-            cannot be created or opened. SGLang runner import failures happen
-            at module import time before this function is called.
+    global installed
+    if installed:
+        return
+    for runner in (DecodeCudaGraphRunner, PrefillCudaGraphRunner):
+        phase: ForwardPhase = "decode" if runner is DecodeCudaGraphRunner else "prefill"
+        setattr(runner, "capture", wrap_graph_method(phase, "capture", runner.capture))
+        setattr(runner, "execute", wrap_graph_method(phase, "execute", runner.execute))
+    atexit.register(close)
+    installed = True
 
-    Side Effects:
-        Creates the configured output directory if needed and monkeypatches
-        SGLang's decode and prefill CUDA graph runner classes. Each
-        event is appended to a per-process JSONL file and flushed immediately.
-    """
 
-    config = get_global_config()
-    outdir = config.debug.graph_observer.outdir
-    if outdir is None:
-        raise RuntimeError("xpool graph observer requires debug.graph_observer.outdir")
+def record_event(runner: GraphRunner, phase: ForwardPhase, kind: int, identity: int, template_sequence: int = 0) -> int:
+    """Preserve serving behavior and retain bounded pre-enqueue failure counts."""
 
-    global event_file, event_handle, installed
-    with install_lock:
-        outdir.mkdir(parents=True, exist_ok=True)
-        desired_event_file = outdir / f"xpool.graph-observer.{os.getpid()}.jsonl"
-        if installed:
-            if event_file != desired_event_file or event_handle is None or event_handle.closed:
-                if event_handle is not None and not event_handle.closed:
-                    event_handle.close()
-                event_handle = desired_event_file.open("a", encoding="utf-8")
-            event_file = desired_event_file
-            return
-
-        if event_handle is not None and not event_handle.closed:
-            event_handle.close()
-        event_file = desired_event_file
-        event_handle = desired_event_file.open("w", encoding="utf-8")
-        event_handle.flush()
-
-        setattr(
-            DecodeCudaGraphRunner,
-            "capture",
-            wrap_graph_method("decode", "capture", DecodeCudaGraphRunner.capture),
+    try:
+        return xpool.native.devkit.graph_observer.record_host(
+            kind,
+            1 if phase == "decode" else 2,
+            type(runner.backend).__name__,
+            identity,
+            template_sequence,
+            time.monotonic_ns(),
         )
-        setattr(
-            DecodeCudaGraphRunner,
-            "execute",
-            wrap_graph_method("decode", "execute", DecodeCudaGraphRunner.execute),
-        )
-        setattr(
-            PrefillCudaGraphRunner,
-            "capture",
-            wrap_graph_method("prefill", "capture", PrefillCudaGraphRunner.capture),
-        )
-        setattr(
-            PrefillCudaGraphRunner,
-            "execute",
-            wrap_graph_method("prefill", "execute", PrefillCudaGraphRunner.execute),
-        )
-        installed = True
+    except Exception as error:
+        record_failure(error)
+        return 0
+
+
+def record_failure(error: Exception) -> None:
+    """Retain one bounded diagnostic; perform no logging or file I/O in Hooks."""
+
+    global enqueue_failures, first_failure
+    enqueue_failures = min(enqueue_failures + 1, 2**64 - 1)
+    if not first_failure:
+        first_failure = f"{type(error).__name__}: {error}"[:512]
 
 
 def wrap_graph_method[R](
-    forward_phase: ForwardPhase,
-    operation: GraphOperation,
-    original: Callable[..., R],
+    phase: ForwardPhase, operation: GraphOperation, original: Callable[..., R]
 ) -> Callable[..., R]:
-    """Wrap one SGLang graph method with begin, error, and end events.
-
-    Args:
-        forward_phase: Decode or prefill runner being observed.
-        operation: Capture or execution operation being observed.
-        original: Original unbound method implementation.
-
-    Returns:
-        Wrapped method preserving the original callable metadata.
-    """
+    """Preserve the original call and reuse one observation identity per call."""
 
     @functools.wraps(original)
     def wrapped(runner: GraphRunner, *args: object, **kwargs: object) -> R:
-        write_event(forward_phase, f"{operation}_begin", runner)
+        begin, end, error = (500, 501, 502) if operation == "capture" else (504, 505, 506)
+        try:
+            template = templates.get(runner, 0) if operation == "execute" else 0
+        except TypeError as error:
+            record_failure(error)
+            template = 0
+        identity = record_event(runner, phase, begin, 0, template)
         try:
             result = original(runner, *args, **kwargs)
         except BaseException:
-            write_event(forward_phase, f"{operation}_error", runner)
+            if identity:
+                record_event(runner, phase, error, identity, template)
             raise
-        write_event(forward_phase, f"{operation}_end", runner)
+        if identity:
+            record_event(runner, phase, end, identity, template)
+            if operation == "capture":
+                try:
+                    templates[runner] = identity
+                except TypeError as error:
+                    record_failure(error)
+                record_event(runner, phase, 503, identity)
         return result
 
     return wrapped
 
 
-def write_event(forward_phase: ForwardPhase, event: str, runner: GraphRunner) -> None:
-    """Write one graph event without disrupting SGLang execution.
+def close() -> bool:
+    """Runtime retirement joins the shared service after actual producer retirement."""
 
-    Args:
-        forward_phase: Decode or prefill runner being observed.
-        event: Capture or execution lifecycle transition.
-        runner: Active SGLang graph runner.
-
-    Side Effects:
-        Appends and flushes one JSON line when the observer file is available.
-    """
-
-    try:
-        current_handle = event_handle
-        if current_handle is None or current_handle.closed:
-            return
-        payload: SglangGraphEvent = {
-            "pid": os.getpid(),
-            "time_ns": time.monotonic_ns(),
-            "forward_phase": forward_phase,
-            "backend_class": type(runner.backend).__name__,
-            "event": event,
-        }
-        line = json.dumps(payload, sort_keys=True) + "\n"
-        with write_lock:
-            current_handle.write(line)
-            current_handle.flush()
-    except Exception:
-        logger.warning("failed to record xpool graph observer event", exc_info=True)
+    if enqueue_failures:
+        logger.warning("Graph event submission failures=%s first_failure=%s", enqueue_failures, first_failure)
+    return enqueue_failures == 0

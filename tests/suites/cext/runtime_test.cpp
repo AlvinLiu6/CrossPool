@@ -34,16 +34,10 @@ TEST(NativeRuntimeStateTest, RejectsInvalidIdentityBeforeInitialization) {
 
 TEST(NativeDebugOptionsTest, ValidatesCapacityBeforeFreezingConfiguration) {
   auto options = xpool::debug::Options{};
-  options.transport_observer.enable = true;
-  EXPECT_THROW(xpool::debug::configure(options, std::nullopt), c10::Error);
-  options.transport_observer.enable = false;
-  options.fabric_observer.enable = true;
-  EXPECT_THROW(xpool::debug::configure(options, std::nullopt), c10::Error);
-  options.fabric_observer.enable = false;
   options.ffn_routing_observer.enable = true;
   EXPECT_THROW(xpool::debug::configure(options, std::nullopt), c10::Error);
   options.ffn_routing_observer.enable = false;
-  options.fabric_observer.record_capacity = 8;
+  options.ffn_routing_observer.record_capacity = 8;
   EXPECT_NO_THROW(xpool::debug::configure(options, std::nullopt));
   EXPECT_NO_THROW(xpool::debug::configure(options, std::nullopt));
   options.fabric_observer.enable = true;

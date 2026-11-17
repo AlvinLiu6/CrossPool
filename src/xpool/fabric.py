@@ -16,6 +16,7 @@ from xpool.config import FfnSchedulingPolicy
 from xpool.memory import DeviceMemoryEstimate, FfnExecutionContract
 from xpool.model import ModelId
 from xpool.native.ffn import LayerKind
+from xpool.observation import ObservationPreparation
 from xpool.utils.dtype import TorchDtype
 from xpool.utils.integer import UINT64_MAX, ensure_uint64
 
@@ -432,6 +433,11 @@ class FabricPlan(FabricModel):
     """Complete semantic execution plan for one Fabric Generation."""
 
     generation: FabricGenerationId = Field(description="Daemon-authoritative generation identity.")
+    observation: ObservationPreparation | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description="Immutable observation preparation facts when collection is enabled.",
+    )
     uid: FabricUid = Field(description="NVSHMEM unique id used to bootstrap the generation.")
     ffn_execution_contracts: tuple[FfnExecutionContract, ...] = Field(
         description="Address-free resources in FfnAgent suffix order."
@@ -458,6 +464,13 @@ class FabricPlan(FabricModel):
         atnagent_count, ffnagent_count = FabricPePlacement.validate_order(self.pe_placements)
         if len(self.ffn_execution_contracts) != ffnagent_count:
             raise ValueError("Execution contracts and FfnAgents must be co-indexed")
+        if self.observation is not None:
+            if len(self.observation.pe_members) != len(self.pe_placements):
+                raise ValueError("observation membership does not cover the authoritative Fabric plan")
+            by_host = {p.host_producer: p for p in self.observation.participants}
+            for member, placement in zip(self.observation.pe_members, self.pe_placements, strict=True):
+                if by_host[member.host_producer].runtime_role != placement.role.value:
+                    raise ValueError("observation membership disagrees with the authoritative Fabric PE role")
         if len(self.model_plans) != len(self.instance_plans):
             raise ValueError("Model Plans and Instance Plans must be co-indexed")
         model_ids = tuple(plan.model_id for plan in self.instance_plans)

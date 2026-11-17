@@ -177,7 +177,11 @@ def test_transport_publication_and_quiesce_preserve_owner_and_timeout(monkeypatc
             {
                 "publisher": {"pid": 11, "abi_version": ABI_VERSION},
                 "bindings": [
-                    {"model_id": str(TEST_MODEL_ID), "rank": 0, "handle": {"handle": arena_record(rank=0).handle}}
+                    {
+                        "model_id": str(TEST_MODEL_ID),
+                        "rank": 0,
+                        "handle": {"handle": arena_record(rank=0).handle, "observation_region": None},
+                    }
                 ],
             },
         ),

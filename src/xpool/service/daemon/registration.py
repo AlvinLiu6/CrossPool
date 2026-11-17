@@ -12,6 +12,7 @@ from xpool import ffn
 from xpool.fabric import FabricRole, InstanceFfnProfile
 from xpool.memory import FfnExecutionContract, MemoryCalibrationEnvironment
 from xpool.model import ModelId
+from xpool.observation import ObservationDeviceRequest, host_creation_id, process_start_key
 from xpool.runtime.transport import InstanceRankTransportProfile
 from xpool.service.errors import XpoolDaemonError
 from xpool.service.wire import (
@@ -30,20 +31,26 @@ HEARTBEAT_WARNING_WATERMARK_S = 15.0
 class CommonRegistration(ABC):
     """Common process identity and heartbeat state stored by the daemon."""
 
-    __slots__ = ("alive", "last_seen_at", "proc")
+    __slots__ = ("alive", "last_seen_at", "observation", "proc")
 
     abi_version: int
     alive: bool
     last_seen_at: float
     proc: ProcUniqId
+    observation: ObservationDeviceRequest | None
 
-    def __init__(self, pid: int, *, now: float) -> None:
+    def __init__(self, pid: int, *, now: float, observation: ObservationDeviceRequest | None = None) -> None:
         """Capture the daemon-side identity for a live client process."""
 
         try:
             self.proc = ProcUniqId(pid)
         except (psutil.Error, ValueError) as exc:
             raise XpoolDaemonError("conflict", f"registering pid {pid} is not live") from exc
+        if observation is not None and (
+            observation.start_key != process_start_key(self.proc) or observation.host_creation_id != host_creation_id()
+        ):
+            raise XpoolDaemonError("conflict", "observation registration does not match the actual process creation")
+        self.observation = observation
         self.alive = True
         self.last_seen_at = now
 
@@ -86,7 +93,7 @@ class CommonRegistration(ABC):
 
         if type(candidate) is not type(self):
             raise TypeError(f"expected {type(self).__name__}, got {type(candidate).__name__}")
-        return self.proc != candidate.proc
+        return self.proc != candidate.proc or self.observation != candidate.observation
 
 
 @dataclass(frozen=True, order=True, slots=True)
@@ -127,10 +134,11 @@ class InstanceRankRegistrationState(CommonRegistration):
         context_state_profile: ElasticContextStatePartitionProfile,
         atn_runtime_headroom_bytes: int,
         now: float,
+        observation: ObservationDeviceRequest | None = None,
     ) -> None:
         """Create one registration from the Instance rank's declared contract."""
 
-        super().__init__(pid, now=now)
+        super().__init__(pid, now=now, observation=observation)
         self.abi_version = abi_version
         self.instance = instance
         self.transport = transport
@@ -176,10 +184,11 @@ class AtnAgentRegistrationState(CommonRegistration):
         abi_version: int,
         pid: int,
         now: float,
+        observation: ObservationDeviceRequest | None = None,
     ) -> None:
         """Create one AtnAgent registration."""
 
-        super().__init__(pid, now=now)
+        super().__init__(pid, now=now, observation=observation)
         self.abi_version = abi_version
         self.device = device
         self.calibration_environment = calibration_environment
@@ -232,10 +241,11 @@ class FfnAgentRegistrationState(CommonRegistration):
         abi_version: int,
         pid: int,
         now: float,
+        observation: ObservationDeviceRequest | None = None,
     ) -> None:
         """Create one FfnAgent registration."""
 
-        super().__init__(pid, now=now)
+        super().__init__(pid, now=now, observation=observation)
         self.abi_version = abi_version
         self.device = device
         self.calibration_environment = calibration_environment
@@ -342,6 +352,7 @@ class RegistrationBook:
         return [
             InstanceRankRegistration(
                 pid=registration.proc.pid,
+                observation=registration.observation,
                 model_id=registration.instance.model_id,
                 rank=registration.instance.rank,
                 abi_version=registration.abi_version,
@@ -359,6 +370,7 @@ class RegistrationBook:
         return [
             AtnAgentView(
                 pid=registration.proc.pid,
+                observation=registration.observation,
                 device=registration.device,
                 abi_version=registration.abi_version,
             )
@@ -374,6 +386,7 @@ class RegistrationBook:
         return [
             FfnAgentView(
                 pid=registration.proc.pid,
+                observation=registration.observation,
                 device=registration.device,
                 device_free_memory_bytes=registration.device_free_memory_bytes,
                 device_total_memory_bytes=registration.device_total_memory_bytes,

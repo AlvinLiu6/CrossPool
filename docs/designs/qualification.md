@@ -73,8 +73,9 @@ idle Lane stays stable while another Lane is repeatedly leased. Scheduler
 mechanisms are owned by native and component tests; installed SGLang serving
 owns observed cross-model lane overlap. SGLang serving qualification instead
 requires its process group to leave no live descendants; it requires
-AtnAgent-side Transport snapshots, while an Instance-side snapshot remains
-optional evidence produced only by explicit detach.
+AtnAgent-side Transport Events, while Instance-side final closure remains
+optional evidence produced only by explicit detach. Readers retain incomplete
+boundaries and Source quality rather than synthesizing terminal timestamps.
 Its harness readiness message carries
 `layer_execution_groups: tuple[tuple[int, ...], ...]` from the admitted
 production Fabric Plan. Placement assertions consume that field, while the

@@ -1,127 +1,74 @@
 from __future__ import annotations
 
-from pathlib import Path
+from typing import cast
 
 import pytest
 
 import xpool.integrations.sglang.devkit.graph_observer
-from xtest.harness.sglang.serving.graph import read_graph_events
-from xtest.harness.support.config import install_test_config, reset_global_config
-from xtest.harness.support.devkit import observer_enabled_config
-from xtest.harness.support.sglang.graph_observer import (
-    FakeDecodeCudaGraphRunnerState,
-    FakePrefillCudaGraphRunnerState,
-    install_fake_sglang_runner_classes,
-    reset_graph_observer,
-    successful_runner_classes,
-)
+from xtest.harness.support.sglang.graph_observer import FakeDecodeCudaGraphRunnerState, reset_graph_observer
 
-pytestmark = pytest.mark.usefixtures(reset_global_config.__name__, reset_graph_observer.__name__)
+pytestmark = pytest.mark.usefixtures(reset_graph_observer.__name__)
 
 
-def test_graph_observer_records_success_events(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    DecodeCudaGraphRunner, PrefillCudaGraphRunner = successful_runner_classes()
-    install_fake_sglang_runner_classes(monkeypatch, DecodeCudaGraphRunner, PrefillCudaGraphRunner)
+def test_graph_call_uses_fresh_execution_and_retains_template(monkeypatch: pytest.MonkeyPatch) -> None:
+    observer = xpool.integrations.sglang.devkit.graph_observer
+    emitted: list[tuple[int, int, int]] = []
+    next_identity = iter((10, 20, 21))
 
-    install_test_config(config=observer_enabled_config("graph_observer", tmp_path.resolve()))
-    xpool.integrations.sglang.devkit.graph_observer.install()
+    def record(kind: int, phase: int, backend: str, identity: int, template: int, time_ns: int) -> int:
+        assigned = identity or next(next_identity)
+        emitted.append((kind, assigned, template))
+        return assigned
 
-    decode_runner = DecodeCudaGraphRunner()
-    prefill_runner = PrefillCudaGraphRunner()
-
-    assert decode_runner.capture() == "captured"
-    assert decode_runner.execute() == "executed"
-    assert prefill_runner.capture() == "prefill-captured"
-    assert prefill_runner.execute() == "prefill-executed"
-
-    events = read_graph_events(tmp_path)
-    assert [(event["forward_phase"], event["event"]) for event in events] == [
-        ("decode", "capture_begin"),
-        ("decode", "capture_end"),
-        ("decode", "execute_begin"),
-        ("decode", "execute_end"),
-        ("prefill", "capture_begin"),
-        ("prefill", "capture_end"),
-        ("prefill", "execute_begin"),
-        ("prefill", "execute_end"),
-    ]
-    assert {event["backend_class"] for event in events[:4]} == {"FullCudaGraphBackend"}
-    assert {event["backend_class"] for event in events[4:]} == {"BreakableCudaGraphBackend"}
-
-
-def test_graph_observer_records_error_and_reraises(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class DecodeCudaGraphRunner(FakeDecodeCudaGraphRunnerState):
-        def capture(self) -> None:
-            raise RuntimeError("capture failed")
-
-        def execute(self) -> None:
-            return None
-
-    class PrefillCudaGraphRunner(FakePrefillCudaGraphRunnerState):
-        def capture(self) -> None:
-            return None
-
-        def execute(self) -> None:
-            return None
-
-    install_fake_sglang_runner_classes(monkeypatch, DecodeCudaGraphRunner, PrefillCudaGraphRunner)
-    install_test_config(config=observer_enabled_config("graph_observer", tmp_path.resolve()))
-    xpool.integrations.sglang.devkit.graph_observer.install()
-
-    with pytest.raises(RuntimeError, match="capture failed"):
-        DecodeCudaGraphRunner().capture()
-
-    events = read_graph_events(tmp_path)
-    assert [(event["forward_phase"], event["event"]) for event in events] == [
-        ("decode", "capture_begin"),
-        ("decode", "capture_error"),
+    monkeypatch.setattr(observer.xpool.native.devkit.graph_observer, "record_host", record)
+    runner = cast(observer.GraphRunner, FakeDecodeCudaGraphRunnerState())
+    capture = observer.wrap_graph_method("decode", "capture", lambda runner: "captured")
+    execute = observer.wrap_graph_method("decode", "execute", lambda runner: "result")
+    assert capture(runner) == "captured"
+    assert execute(runner) == execute(runner) == "result"
+    assert emitted == [
+        (500, 10, 0),
+        (501, 10, 0),
+        (503, 10, 0),
+        (504, 20, 10),
+        (505, 20, 10),
+        (504, 21, 10),
+        (505, 21, 10),
     ]
 
 
-def test_graph_observer_event_fault_does_not_block_runner(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
+def test_graph_failure_preserves_original_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    observer = xpool.integrations.sglang.devkit.graph_observer
+    emitted: list[int] = []
+
+    def record(kind: int, phase: int, backend: str, identity: int, template: int, time_ns: int) -> int:
+        emitted.append(kind)
+        return identity or 7
+
+    monkeypatch.setattr(observer.xpool.native.devkit.graph_observer, "record_host", record)
+    error = ValueError("runner failed")
+
+    def fail(runner: observer.GraphRunner) -> None:
+        raise error
+
+    runner = cast(observer.GraphRunner, FakeDecodeCudaGraphRunnerState())
+    with pytest.raises(ValueError) as caught:
+        observer.wrap_graph_method("prefill", "capture", fail)(runner)
+    assert caught.value is error
+    assert emitted == [500, 502]
+
+
+def test_enqueue_failure_keeps_serving_result_and_reports_failure(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    class DecodeCudaGraphRunner(FakeDecodeCudaGraphRunnerState):
-        def capture(self) -> str:
-            return "captured"
+    observer = xpool.integrations.sglang.devkit.graph_observer
 
-        def execute(self) -> str:
-            return "executed"
+    def fail(*args: object) -> int:
+        raise RuntimeError("Source unavailable")
 
-    class PrefillCudaGraphRunner(FakePrefillCudaGraphRunnerState):
-        def capture(self) -> str:
-            return "prefill-captured"
-
-        def execute(self) -> str:
-            return "prefill-executed"
-
-    install_fake_sglang_runner_classes(monkeypatch, DecodeCudaGraphRunner, PrefillCudaGraphRunner)
-    install_test_config(config=observer_enabled_config("graph_observer", tmp_path.resolve()))
-    xpool.integrations.sglang.devkit.graph_observer.install()
-
-    class BadEventHandle:
-        closed = False
-
-        def write(self, line: str) -> int:
-            raise OSError("write failed")
-
-        def flush(self) -> None:
-            return None
-
-        def close(self) -> None:
-            return None
-
-    monkeypatch.setattr(xpool.integrations.sglang.devkit.graph_observer, "event_handle", BadEventHandle())
-
-    with caplog.at_level("WARNING", logger="xpool.integrations.sglang.devkit.graph_observer"):
-        assert DecodeCudaGraphRunner().capture() == "captured"
-
-    assert "failed to record xpool graph observer event" in caplog.text
+    monkeypatch.setattr(observer.xpool.native.devkit.graph_observer, "record_host", fail)
+    runner = cast(observer.GraphRunner, FakeDecodeCudaGraphRunnerState())
+    assert observer.wrap_graph_method("decode", "execute", lambda runner: "ok")(runner) == "ok"
+    assert observer.enqueue_failures == 1
+    assert not observer.close()
+    assert "Source unavailable" in caplog.text
